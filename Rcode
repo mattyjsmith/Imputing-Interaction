@@ -1,587 +1,2270 @@
 ###########################################################################
 # Title: Imputing interaction variables: performance of various approaches
-# Author: Matthew J. Smith, Edmund Njeru Njagi
-# Date: 6th March 2022
+# Author: Matthew J. Smith, Matteo Quartagno, Edmund Njeru Njagi
+# Date: 9th August 2022
 ###########################################################################
 
 # Set working directory
-setwd("N:/ICON_all/Users/Matthew Smith/Research Fellow in Statistics/Methods")
+  setwd("N:/ICON_all/Users/Matthew Smith/Research Fellow in Statistics/Methods/Imputing logistic regression interactions")
+
+# Install necessary packages
+  #install.packages(c('mice','tidyr','mitools','smcfcs','gtools'))
+  library(mice)
+  library(tidyr)
+  library(mitools)
+  library(smcfcs)
+  library(gtools)
 
 # Number of imputations
-m <- 10
+  m <- 10
 
 # Number of iterations
-maxit <- 10
-numit <- 10
+  maxit <- 10
+  numit <- 10
 
+# Number of simulations
+  number.sims <- 1000
+  n.sim <- seq(1,number.sims,1)
+  sims <- seq(1,length(n.sim),1)
+
+{
 # Define the function 
-sim.dt <- function(n=10000, seed=seed, ydiagmin=2005, ydiagmax=2010,
-                   probtreat=0.3, probfem=0.5, meanage=70, sdage=10, probdep=1.2, probstage=0.4, probcmb=0.35, probfrailty=0.2, probroute=0.2,  
-                   treatef=0.7, sexef=1.1, ageef=1.4, 
-                   dep2ef=1, dep3ef=1, dep4ef=1, dep5ef=1, stageef=1, cmbef=1, frailef=1, routeef=1, depef=1, IntStageCmbef=1 
-                   #, ind.var = 'treat + sex + agediag'
-) {
+  sim.dt <- function(n=10000, seed=seed, ydiagmin=2005, ydiagmax=2010,
+                     meanage=70, sdage=10, meancmb=2, sdcmb=0.5,
+                     probtreat=0.3, probfem=0.5, probdep=1.2, 
+                     probstage=0.4, probcmb=0.3, probfrailty=0.2, probroute=0.2,  
+                     treatef=0.7, sexef=1.1, ageef=1.4, 
+                     dep2ef=1, dep3ef=1, dep4ef=1, dep5ef=1, stageef=1, cmbef=1, 
+                     frailef=1, routeef=1, depef=1, IntStageCmbef=1,
+                     ccmbef=1, IntStageCcmbef=1
+                     #, ind.var = 'treat + sex + agediag'
+  ) {
+    
+    # Set the seed
+    set.seed(seed)
+    
+    # Simulate the variables
+    treat <- rbinom(n, 1, prob = probtreat) # Treatment: 0 = control, 1 = treated
+    sex <- rbinom(n, size = 1, prob = probfem) #Sex: 0 = male, 1 = female
+    agediag <- rnorm(n, meanage, sdage); agediag <- (agediag - mean(agediag))/10 
+    dep <- rbeta(n, 1, probdep) # Deprivation: binomial distribution with 'b' as 1.2 by default
+    depcat <- ifelse(dep<0.2,1,
+                     ifelse(dep<0.4,2,
+                            ifelse(dep<0.6,3,
+                                   ifelse(dep<.8,4,
+                                          ifelse(dep>= .8, 5, 0))))); 
+    dep2 <- ifelse(depcat==2,1,0)
+    dep3 <- ifelse(depcat==3,1,0)
+    dep4 <- ifelse(depcat==4,1,0)
+    dep5 <- ifelse(depcat==5,1,0)
+    stage <- rbinom(n, size = 1, prob = probstage) #Stage: 0 = (I-III), 1 = IV
+    cmb <- rbinom(n, size = 1, prob = probcmb) # Comorbidity: 0=no, 1=yes
+    frailty <- rbinom(n, size = 1, prob = probfrailty) # Frailty: 0 = not, 1 = frail
+    route <- rbinom(n, 1, prob = probroute) # Route: 0 = non-emergency, 1 = emergency
+    year <- runif(n, min = ydiagmin, max = ydiagmax) # Year of diagnosis
+    IntStageCmb <- stage*cmb
+    
+    # Continuous form for comorbidity
+    ccmb <- rnorm(n, meancmb, sdcmb); ccmb <- (ccmb - mean(ccmb)) 
+    IntStageCcmb <- stage * ccmb
+    
+    # Specify parameters for the outcome model
+    beta1 <-  log(treatef) # Treatment
+    beta2 <-  log(sexef) # Sex
+    beta3 <-  log(ageef) # Age
+    beta4 <-  log(dep2ef) # Deprivation 2
+    beta5 <-  log(dep3ef) # Deprivation 3
+    beta6 <-  log(dep4ef) # Deprivation 4
+    beta7 <-  log(dep5ef) # Deprivation 5
+    beta8 <-  log(stageef) # Stage
+    beta9 <-  log(cmbef) # Comorbidity
+    beta10 <- log(frailef) # Frailty
+    beta11 <- log(routeef) # Route
+    beta12 <- log(depef) # Deprivation (continuous)
+    beta13 <- log(IntStageCmbef) # Interaction effect
+    beta14 <- log(ccmbef) # Effect of continuous form of comorbidity
+    beta15 <- log(IntStageCcmbef) # Interaction effect for continuous comorbidity
+    
+    # Create the design matrix
+    coef.vec <- c(beta1,beta2,beta3,beta4,beta5,beta6,beta7,beta8,beta9,beta10,beta11,beta12,beta13,beta14,beta15)
+    design.mat <- cbind(treat,sex,agediag,dep2,dep3,dep4,dep5,stage,cmb,frailty,route,dep,IntStageCmb,ccmb,IntStageCcmb)
+    
+    z <- -3 + (design.mat %*% coef.vec)
+    
+    prdeath <- 1 / (1 + exp(-z))         # pass through an inv-logit function
+    death  <- rbinom(n,1,prdeath)        # Indicator of death within 30 days
+    
+    # Put the variables into a data frame
+    df <- data.frame(death, prdeath, treat, sex, agediag, dep2, dep3, dep4, dep5, stage, cmb, 
+                     frailty, route, dep, IntStageCmb, ccmb, IntStageCcmb, year)
+    return(df)
+  }
+
+
+# Create a data frame to hold the estimates
+  estimates <- data.frame(matrix(nrow = 1, ncol = 9))
+  colnames(estimates) <- c('Rep', 'Cmb', 'Stage', 'Int', 'CmbSE', 'StageSE', 'IntSE', 'DGM', 'Method')
+  estimates
+
+}
+  
+# Run the simulations  
+  
+{
+  
+########################################################################################################################
+# Scenario 1: Base-case
+# MAR, binary Z, 30% pZ, 20% missing X, OR = 1.3
+########################################################################################################################
+
+# Specify criteria for this scenario
+  beta.int <- 1.3   # Effect of interaction (i.e., OR = 1.3)
+  prob.cmb <- 0.3   # Prevalence of fully observed variable in interaction
+  z <- 20           # Proportion of missing data in stage variable
+
+
+# Start the loop through the simulations...
+  for (i in n.sim) {
   
   # Set the seed
-  set.seed(seed)
-  
-  # Simulate the variables
-  treat <- rbinom(n, 1, prob = probtreat) # Treatment: 0 = control, 1 = treated
-  sex <- rbinom(n, size = 1, prob = probfem) #Sex: 0 = male, 1 = female
-  agediag <- rnorm(n, meanage, sdage); agediag <- (agediag - mean(agediag))/10 
-  dep <- rbeta(n, 1, probdep) # Deprivation: binomial distribution with 'b' as 1.2 by default
-  depcat <- ifelse(dep<0.2,1,
-                   ifelse(dep<0.4,2,
-                          ifelse(dep<0.6,3,
-                                 ifelse(dep<.8,4,
-                                        ifelse(dep>= .8, 5, 0))))); 
-  dep2 <- ifelse(depcat==2,1,0)
-  dep3 <- ifelse(depcat==3,1,0)
-  dep4 <- ifelse(depcat==4,1,0)
-  dep5 <- ifelse(depcat==5,1,0)
-  stage <- rbinom(n, size = 1, prob = probstage) #Stage: 0 = (I-III), 1 = IV
-  cmb <- rbinom(n, size = 1, prob = probcmb) # Comorbidity: 0=no, 1=yes
-  frailty <- rbinom(n, size = 1, prob = probfrailty) # Frailty: 0 = not, 1 = frail
-  route <- rbinom(n, 1, prob = probroute) # Route: 0 = non-emergency, 1 = emergency
-  year <- runif(n, min = ydiagmin, max = ydiagmax) # Year of diagnosis
-  IntStageCmb <- stage*cmb
-  
-  # Specify parameters for the outcome model
-  beta1 <-  log(treatef) # Treatment
-  beta2 <-  log(sexef) # Sex
-  beta3 <-  log(ageef) # Age
-  beta4 <-  log(dep2ef) # Deprivation 2
-  beta5 <-  log(dep3ef) # Deprivation 3
-  beta6 <-  log(dep4ef) # Deprivation 4
-  beta7 <-  log(dep5ef) # Deprivation 5
-  beta8 <-  log(stageef) # Stage
-  beta9 <-  log(cmbef) # Comorbidity
-  beta10 <- log(frailef) # Frailty
-  beta11 <- log(routeef) # Route
-  beta12 <- log(depef) # Deprivation (continuous)
-  beta13 <- log(IntStageCmbef)
-  
-  # Create the design matrix
-  coef.vec <- c(beta1,beta2,beta3,beta4,beta5,beta6,beta7,beta8,beta9,beta10,beta11,beta12,beta13)
-  design.mat <- cbind(treat,sex,agediag,dep2,dep3,dep4,dep5,stage,cmb,frailty,route,dep,IntStageCmb)
-  
-  z <- -3 + (design.mat %*% coef.vec)
-  
-  prdeath <- 1 / (1 + exp(-z))         # pass through an inv-logit function
-  death  <- rbinom(n,1,prdeath)        # Indicator of death within 30 days
-  
-  # Put the variables into a data frame
-  df <- data.frame(death, prdeath, treat, sex, agediag, dep2, dep3, dep4, dep5, stage, cmb, frailty, route, dep, IntStageCmb, year)
-  return(df)
-}
+    seed <- i
+    
+  # Generate the data
+    data <- sim.dt(n = 100000, seed = i, probcmb = prob.cmb,
+                 treatef = 0.85, ageef = 1.3, sexef = 0.9, depef = 1.2, 
+                 cmbef = 0.9, stageef = 1.4, IntStageCmbef = beta.int)
+    print(paste0('Data for simulation ', i ,' generated'))
 
-
-# Generate the data 
-# Specify the desired true value of the coefficient for the interaction
-beta.int <- 1.3
-beta.stage <- 1.6
-beta.cmb <- 1.3
-
-# Specify the prevalence of the stage variable
-  z <- c(1,5,10,20,30,40,50)
-  
-# Create lists to hold the results of the simulations
-  model.1 <- list()
-  model.1.1 <- list()
-  model.2 <- list()
-  model.2.1 <- list()
-  pass.all.coef <- list()
-  pass.mean.coef <- list()
-  jav.all.coef <- list()
-  jav.mean.coef <- list()
-  sia.all.coef <- list()
-  sia.mean.coef <- list()
-  smcfcs.all.coef <- list()
-  smcfcs.mean.coef <- list()
-  
-
-#########################################################################################################################
-# Perform the analysis
-#   1. Loop through different prevalence of stage (i.e., 1%, 5%, 10%, 20%, 30%, 40%, 50%):
-#       2. Conduct 100 simulations:
-#           3. Perform:
-#               a. Passive imputation
-#               b. JAV imputation
-#               c. SIA imputation
-#               d. SMC-FCS imputation
-#########################################################################################################################
-
-for (y in z) {
-    # Run the function to generate the data
-      seed <- 1234  # Set the seed
-      data <- sim.dt(n = 100000, seed = seed, probstage = y/100,
-                     treatef = 0.85, ageef = 1.3, sexef = 0.9, depef = 1.2, 
-                     cmbef = beta.cmb, stageef = beta.stage, IntStageCmbef = beta.int)
+  # Generate some missing data
+    n <- length(data$agediag)
+    p.stage  <- c(z)
+    z.stage <- seq(-5.0, -0.0, 0.01)
     
-   
+    # Outcome-dependent missing at random for Stage
+    stage.omar <- function(n, betas) {
+      data$p.miss <- (exp(betas))/(1+exp(betas));     summary(data$p.miss)
+      data$i.miss <- rbinom(1:n,1, prob=data$p.miss);    prop.table(table(data$i.miss))
+      miss.prop <- (plyr::round_any(mean(data$i.miss), accuracy=0.01, f = round))*100; miss.prop
+      col_name <- paste0('stage.omar', '.', miss.prop, '.', i)
+      stage2 <- data.frame(ifelse(data$i.miss==1, NA, data$stage))
+      colnames(stage2) <- col_name
+      data <- cbind(data,stage2)
+      return(data)
+    }
     
-    ##################################### 
-    # Fully observed results
-    #####################################    
-    
-      # Check the results of the fully observed data
-      model.1[[y]] <- glm( death ~ treat + agediag + sex + dep + cmb + stage + IntStageCmb,
-                     data = data, family = "binomial"); summary(model.1[[y]]); exp(model.1[[y]]$coefficients[-1])
-      
-      model.1.1[[y]] <- glm( death ~ treat + agediag + sex + dep + cmb + stage + cmb*stage,
-                       data = data, family = "binomial"); summary(model.1.1[[y]]); exp(model.1.1[[y]]$coefficients[-1])
-    
-      # Number of simulations required
-      sum.model1 <- summary(model.1[[1]])
-      se.int <- sum.model1$coefficients[8,2]; se.int
-      coef.int <- sum.model1$coefficients[8,1]; coef.int
-      
-      number.sims <- ((1.96*(se.int))/(0.05*coef.int))^2; number.sims <- ceiling(number.sims); number.sims
-      number.sims <- 100
-      #if (number.sims < 100) {number.sims <- 1000}
-    
-    ########################################  
-    # Simulate missing data
-    ########################################  
-    
-      # First define some objects
-      n <- length(data$agediag)
-      p.stage  <- c(40)
-      #z.stage  <- seq( -7.75,  -7.74, 0.01)
-      z.stage <- seq(-5.0, -0.0, 0.01)
-      
-      #n.sim <- c(1,2,3,4,5,6,8,9,10,11,13,14,15,16,17,18,19,21,23,24,26,28,31,32,33,34,35,36,37,38,39,40,
-      #            41,44,45,47,48,49,50,51,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,71,72,73,74,75,
-      #            76,77,78,79,80,82,83,84,85,87,88,89,91,92,93,94,95,96,99,100,101,102,103,105,107,108,109,110,
-      #            111,112,114,115,116,117,118,119,120,121)          # n.sim   <- seq(121,130,1)
-      n.sim <- seq(1,number.sims,1)
-      #n.sim <- 1:2
-      #  n.sim3 <- c(7,12,20,22,25,27,29,30,42,43,46,52,70,81,86,90,97,98,104,106,113)
-      
-      # Outcome-dependent missing at random for Stage
-      stage.omar <- function(n, betas, seed=k) {
+    count <- 0
+    start_time <- Sys.time()
+    count <- count + 1
+      for (j in z.stage) {
+        betas <- j + 1.0*(data$treat) + 1.0*(data$agediag) + 1.0*(data$sex) + 
+                      1.0*(data$dep) + 1.0*(data$cmb) + 1.0*(data$death)
         data$p.miss <- (exp(betas))/(1+exp(betas));     summary(data$p.miss)
-        set.seed(k)
         data$i.miss <- rbinom(1:n,1, prob=data$p.miss);    prop.table(table(data$i.miss))
         miss.prop <- (plyr::round_any(mean(data$i.miss), accuracy=0.01, f = round))*100; miss.prop
-        col_name <- paste0('stage.omar', '.', miss.prop, '.', k)
-        stage2 <- data.frame(ifelse(data$i.miss==1, NA, data$stage))
-        colnames(stage2) <- col_name
-        data <- cbind(data,stage2)
-        return(data)
+        for (k in p.stage) {
+          if (miss.prop==(k) ) {  
+            data <- stage.omar(n, betas)
+          }
+        }
+        data <- data[, !duplicated(colnames(data))]
+      }
+      print(paste0('Missing data for simulation ', i , ' generated'))
+    end_time <- Sys.time()
+    end_time - start_time
+  
+  # Duplicate the data
+    data2 <- data  
+    print(paste0('Data duplicated'))
+  
+  # Redefine the variables as factors
+    data2$stage.var  <- as.factor(data2[[paste0("stage.omar.20.", i)]])      # Stage variable
+    
+    
+  ########################
+  # Complete case analysis
+  ########################
+  
+  # Check the results of the partially observed data
+    CCAmodel.1   <- glm( death ~ treat + agediag + sex + dep + cmb + stage.var + IntStageCmb,
+                           data = data2, family = "binomial"); summary(CCAmodel.1); exp(CCAmodel.1$coefficients[-1])
+    
+    CCAmodel.1a <- glm( death ~ treat + agediag + sex + dep + cmb + stage.var + cmb*stage.var,
+                           data = data2, family = "binomial"); summary(CCAmodel.1a); exp(CCAmodel.1a$coefficients[-1])
+    print(paste0('Complete case analysis model done'))
+  
+    
+  ####################
+  # Passive imputation
+  ####################
+    
+  # Specify the variables to be used in the imputation
+    data2 <- data2[,c('death','treat','agediag','sex','dep','cmb','stage.var')]
+    
+  # Perform passive imputation
+    pass.imp <- mice(data2, meth = c('','','','','','','logreg'), m=m, maxit = maxit, seed = i)  # Perform passive imputation
+    
+  # For each imputed data set, create the interaction variable based on stage*comorbidity
+    pass.imp.data <- list()
+    for (j in 1:m) {
+      pass.imp.data[[j]] <- complete(pass.imp, j)
+      pass.imp.data[[j]]$stage.var <- as.numeric(pass.imp.data[[j]]$stage.var)
+      pass.imp.data[[j]]$stage.var <- pass.imp.data[[j]]$stage.var - 1
+      pass.imp.data[[j]]$IntStageCmb <- pass.imp.data[[j]]$cmb * as.numeric(pass.imp.data[[j]]$stage.var)
+    }
+    
+  # For this simulation, obtain the coefficients for each of the imputed data sets
+    pass.imp.fit <- list()
+    for (j in 1:m) {  
+      invisible(capture.output(pass.imp.fit.j <- glm(death ~ treat + agediag + sex + dep + cmb + stage.var + IntStageCmb,
+                                                     data = pass.imp.data[[j]], family = "binomial") 
+      ))
+      pass.imp.fit[[j]] <- pass.imp.fit.j
+      print(paste0("Model ", j, " done"))
+    }  
+    
+  # Within this simulation, combine the estimates
+    pass.sim.coef <- MIextract(pass.imp.fit, fun = coef);  pass.sim.coef
+    pass.sim.var  <- MIextract(pass.imp.fit, fun = function(x) diag(vcov(x)));  pass.sim.var
+    pass.sim.est <- MIcombine(pass.sim.coef, pass.sim.var); pass.sim.est
+    
+  # Add the results to the estimates data set
+    estimates1 <- data.frame(Rep = i, 
+                             Cmb = pass.sim.est[["coefficients"]][["cmb"]],
+                             Stage = pass.sim.est[["coefficients"]][["stage.var"]],
+                             Int = pass.sim.est[["coefficients"]][["IntStageCmb"]],
+                             CmbSE = pass.sim.est[["variance"]][6,6],
+                             StageSE = pass.sim.est[["variance"]][7,7],
+                             IntSE = pass.sim.est[["variance"]][8,8],
+                             DGM = 1,
+                             Method = 'Passive'
+                             )
+    estimates <- rbind(estimates, estimates1)
+    
+  # State the completion of the simulation
+    print(paste0('Passive imputation: ', 'simulation ', i, ' done'))
+    
+    
+    
+  #######################  
+  # Just another variable
+  #######################
+      
+  # Obtain the data
+    data2 <- data
+      
+  # Rename the variables of interest
+    data2$stage.var  <- data2[[paste0("stage.omar.20.", i)]]      # Stage variable
+      
+  # Recode the interaction variable (because it must be missing when stage is missing)
+    data2$IntStageCmb <- data2$cmb * data2$stage.var
+      
+  # Convert to factor variables
+    data2$stage.var <- as.factor(data2$stage.var)
+    data2$IntStageCmb <- as.factor(data2$IntStageCmb) 
+      
+  # Specify the variables to be used in the imputation
+    data2 <- data2[,c('death','treat','agediag','sex','dep','cmb','stage.var','IntStageCmb')]
+      
+  # Perform passive imputation
+    jav.imp <- mice(data2, meth = c('','','','','','','logreg','logreg'), m=m, maxit = maxit, seed = i)  # Perform passive imputation
+      
+  # Extract the imputed data sets
+    jav.imp.data <- list()
+    for (j in 1:m) {
+      jav.imp.data[[j]] <- complete(jav.imp,j)
+      
+      jav.imp.data[[j]]$stage.var   <- as.numeric(jav.imp.data[[j]]$stage.var)
+      jav.imp.data[[j]]$IntStageCmb <- as.numeric(jav.imp.data[[j]]$IntStageCmb)
+      
+      jav.imp.data[[j]]$stage.var   <- jav.imp.data[[j]]$stage.var - 1
+      jav.imp.data[[j]]$IntStageCmb <- jav.imp.data[[j]]$IntStageCmb - 1
+      
+      #print(head(jav.imp.data[[j]][is.na(data$stage.var), ], 10))
+    }
+      
+  # Obtain coefficients for each of the data sets
+    jav.imp.fit <- list()
+    for (j in 1:m) {  
+      invisible(capture.output(jav.imp.fit.j <- glm(death ~ treat + agediag + sex + dep + cmb + stage.var + IntStageCmb,
+                                                    data = jav.imp.data[[j]], family = "binomial")
+      ))
+      jav.imp.fit[[j]] <- jav.imp.fit.j
+      print(paste0("Model ", j, " done"))
+    }
+      
+  # Within this simulation, combine the estimates
+    jav.sim.coef <- MIextract(jav.imp.fit, fun = coef);  jav.sim.coef
+    jav.sim.var  <- MIextract(jav.imp.fit, fun = function(x) diag(vcov(x)));  jav.sim.var
+    jav.sim.est  <- MIcombine(jav.sim.coef, jav.sim.var); jav.sim.est
+      
+  # Add the results to the estimates data set
+    estimates1 <- data.frame(Rep = i, 
+                             Cmb = jav.sim.est[["coefficients"]][["cmb"]],
+                             Stage = jav.sim.est[["coefficients"]][["stage.var"]],
+                             Int = jav.sim.est[["coefficients"]][["IntStageCmb"]],
+                             CmbSE = jav.sim.est[["variance"]][6,6],
+                             StageSE = jav.sim.est[["variance"]][7,7],
+                             IntSE = jav.sim.est[["variance"]][8,8],
+                             DGM = 1,
+                             Method = 'JAV'
+    )
+    estimates <- rbind(estimates, estimates1)
+      
+  # State the completion of the simulation
+    print(paste0('JAV imputation: ', 'simulation ', i, ' done'))
+    
+    
+  ########################
+  # Stratify-impute-append
+  ########################
+    
+      
+  # Obtain the data
+    data2 <- data
+      
+  # Redefine the variables as factors
+    data2$stage.var  <- as.factor(data2[[paste0("stage.omar.20.", i)]])      # Stage variable
+      
+  # Specify the variables to be used in the imputation
+    data2 <- data2[,c('death','treat','agediag','sex','dep','cmb','stage.var')]
+      
+  # Stratify the data by levels of comorbidity
+    # For those without comorbidity
+      data2.cmb0 <- data2[data2$cmb == 0,]
+      data2.cmb0 <- subset(data2.cmb0, select = -(cmb))
+    # For those with comorbidity
+      data2.cmb1 <- data2[data2$cmb == 1,]
+      data2.cmb1 <- subset(data2.cmb1, select = -(cmb))  
+      
+  # Separately for each strata of comorbidity, impute the partially observed variables  
+    # For those without comorbidity
+      # Impute
+      sia.imp.cmb0 <- mice(data2.cmb0, meth = c('','','','','','logreg'), 
+                           m=m, maxit = maxit, seed = i)  # Perform passive imputation    
+      # State the completion of the imputation for cmb0
+      print(paste0("Imputation for Cmb0 done"))
+      
+    # For those with comorbidity
+      #Impute
+      sia.imp.cmb1 <- mice(data2.cmb1, meth = c('','','','','','logreg'), 
+                           m=m, maxit = maxit, seed = i)  # Perform passive imputation    
+      # State the completion of the imputation for cmb1
+      print(paste0("Imputation for Cmb1 done"))
+      
+    # For each imputed data set, create the interaction variable based on stage*comorbidity
+      sia.imp.cmb0.data <- list()
+      sia.imp.cmb1.data <- list()
+      for (j in 1:m) {
+        # For those without comorbidity
+        sia.imp.cmb0.data[[j]] <- complete(sia.imp.cmb0, j)
+        
+        sia.imp.cmb0.data[[j]]$cmb <- 0
+        
+        sia.imp.cmb0.data[[j]]$stage.var <- as.numeric(sia.imp.cmb0.data[[j]]$stage.var)
+        
+        sia.imp.cmb0.data[[j]]$stage.var <- sia.imp.cmb0.data[[j]]$stage.var - 1
+        
+        sia.imp.cmb0.data[[j]]$IntStageCmb <- sia.imp.cmb0.data[[j]]$cmb * sia.imp.cmb0.data[[j]]$stage.var
+        
+        # For those with comorbidity
+        sia.imp.cmb1.data[[j]] <- complete(sia.imp.cmb1, j)
+        
+        sia.imp.cmb1.data[[j]]$cmb <- 1
+        
+        sia.imp.cmb1.data[[j]]$stage.var <- as.numeric(sia.imp.cmb1.data[[j]]$stage.var)
+        
+        sia.imp.cmb1.data[[j]]$stage.var <- sia.imp.cmb1.data[[j]]$stage.var - 1
+        
+        sia.imp.cmb1.data[[j]]$IntStageCmb <- sia.imp.cmb1.data[[j]]$cmb * sia.imp.cmb1.data[[j]]$stage.var
       }
       
-      count <- 0
-      start_time <- Sys.time()
-        for (k in n.sim) {
-        count <- count + 1
-        for (j in z.stage) {
-          betas <- j + 1.0*(data$treat) + 1.0*(data$agediag) + 1.0*(data$sex) + 1.0*(data$dep) + 1.0*(data$cmb) + 1.0*(data$death)
-          data$p.miss <- (exp(betas))/(1+exp(betas));     summary(data$p.miss)
-          set.seed(k)
-          data$i.miss <- rbinom(1:n,1, prob=data$p.miss);    prop.table(table(data$i.miss))
-          miss.prop <- (plyr::round_any(mean(data$i.miss), accuracy=0.01, f = round))*100; miss.prop
-          for (i in p.stage) {
-            if (miss.prop==(i) ) {  
-              data <- stage.omar(n, betas, seed=k)
-            }
-          }
-          data <- data[, !duplicated(colnames(data))]
+    # Append the imputed data sets for the two strata (giving K imputed data sets)
+      sia.sim.cmb.data.merge <- list()
+      for (j in 1:m) {
+        sia.sim.cmb.data.merge[[j]] <- rbind(sia.imp.cmb0.data[[j]], sia.imp.cmb1.data[[j]])
+      }
+      
+    # Obtain coefficients for each of the data sets
+      sia.imp.fit <- list()
+      for (j in 1:m) {  
+        invisible(capture.output(sia.imp.fit.j <- glm(death ~ treat + agediag + sex + dep + cmb + stage.var + IntStageCmb,
+                                                      data = sia.sim.cmb.data.merge[[j]], family = "binomial") #; summary(sia.imp.fit.i)
+        ))
+        sia.imp.fit[[j]] <- sia.imp.fit.j
+        print(paste0("Model ", j, " done"))
+      }    
+      
+    # Within each simulation, combine the estimates
+      print(paste0("Combining estimates"))
+      sia.sim.coef <- MIextract(sia.imp.fit, fun = coef);  sia.sim.coef
+      sia.sim.var  <- MIextract(sia.imp.fit, fun = function(x) diag(vcov(x)));  sia.sim.var
+      sia.sim.est  <- MIcombine(sia.sim.coef, sia.sim.var); sia.sim.est
+      
+    # Add the results to the estimates data set
+      estimates1 <- data.frame(Rep = i, 
+                               Cmb = sia.sim.est[["coefficients"]][["cmb"]],
+                               Stage = sia.sim.est[["coefficients"]][["stage.var"]],
+                               Int = sia.sim.est[["coefficients"]][["IntStageCmb"]],
+                               CmbSE = sia.sim.est[["variance"]][6,6],
+                               StageSE = sia.sim.est[["variance"]][7,7],
+                               IntSE = sia.sim.est[["variance"]][8,8],
+                               DGM = 1,
+                               Method = 'SIA'
+      )
+      estimates <- rbind(estimates, estimates1)
+      
+    # State the completion of this simulation
+      print(paste0('SIA imputation: ', 'simulation ', i, ' done'))
+   
+      
+  ####################################
+  # SMC-FCS
+  ####################################
+        
+      # Obtain the data
+      data2 <- data
+      
+      # Redefine the variables as factors
+      data2$stage.var  <- as.factor(data2[[paste0("stage.omar.20.", i)]])      # Stage variable
+      
+      # Specify the variables to be used in the imputation
+      data.subset <- data2[,c('death','treat','agediag','sex','dep','cmb','stage.var')]
+      
+      # Perform imputation on the variables ("SMC-FCS")
+      smcfcs.imp <- smcfcs(data.subset, smtype = 'logistic', 
+                           smformula = 'death ~ treat + agediag + sex + dep + cmb + stage.var + cmb*stage.var',
+                           method = c('','','','','','','logreg'), m=m, numit=numit) 
+      
+      # Fit substantive model
+      smcfcslist <- imputationList(smcfcs.imp$impDatasets)
+      smcfcs.models <- with(smcfcslist, glm(death ~ treat + agediag + sex + dep + 
+                                              cmb + stage.var + cmb*stage.var, family = 'binomial'))  
+      smcfcs.sim.est <- MIcombine(smcfcs.models); smcfcs.sim.est
+      
+      # Add the results to the estimates data set
+      estimates1 <- data.frame(Rep = i, 
+                               Cmb = smcfcs.sim.est[["coefficients"]][["cmb"]],
+                               Stage = smcfcs.sim.est[["coefficients"]][["stage.var1"]],
+                               Int = smcfcs.sim.est[["coefficients"]][["cmb:stage.var1"]],
+                               CmbSE = smcfcs.sim.est[["variance"]][6,6],
+                               StageSE = smcfcs.sim.est[["variance"]][7,7],
+                               IntSE = smcfcs.sim.est[["variance"]][8,8],
+                               DGM = 1,
+                               Method = 'SMCFCS'
+      )
+      estimates <- rbind(estimates, estimates1)
+      
+      # State the completion of this simulation
+      print(paste0('SMCFCS imputation: ', 'simulation ', i, ' done'))
+      
+    }
+    
+
+    
+
+
+
+########################################################################################################################
+# Scenario 2: Low Odds Ratio 
+# MAR, binary Z, 30% pZ, 20% missing X, OR = 1.1
+########################################################################################################################
+
+
+# Specify criteria for this scenario
+  beta.int <- 1.1   # Effect of interaction (i.e., OR = 1.3)
+  prob.cmb <- 0.3   # Prevalence of fully observed variable in interaction
+  z <- 20           # Proportion of missing data in stage variable
+
+# Start the loop through the simulations...
+  for (i in n.sim) {
+    
+    # Set the seed
+    seed <- i
+    
+    # Generate the data
+    data <- sim.dt(n = 100000, seed = i, probcmb = prob.cmb,
+                   treatef = 0.85, ageef = 1.3, sexef = 0.9, depef = 1.2, 
+                   cmbef = 0.9, stageef = 1.4, IntStageCmbef = beta.int)
+    print(paste0('Data for simulation ', i ,' generated'))
+    
+    # Generate some missing data
+    n <- length(data$agediag)
+    p.stage  <- c(z)
+    z.stage <- seq(-5.0, -0.0, 0.01)
+    
+    # Outcome-dependent missing at random for Stage
+    stage.omar <- function(n, betas) {
+      data$p.miss <- (exp(betas))/(1+exp(betas));     summary(data$p.miss)
+      data$i.miss <- rbinom(1:n,1, prob=data$p.miss);    prop.table(table(data$i.miss))
+      miss.prop <- (plyr::round_any(mean(data$i.miss), accuracy=0.01, f = round))*100; miss.prop
+      col_name <- paste0('stage.omar', '.', miss.prop, '.', i)
+      stage2 <- data.frame(ifelse(data$i.miss==1, NA, data$stage))
+      colnames(stage2) <- col_name
+      data <- cbind(data,stage2)
+      return(data)
+    }
+    
+    count <- 0
+    start_time <- Sys.time()
+    count <- count + 1
+    for (j in z.stage) {
+      betas <- j + 1.0*(data$treat) + 1.0*(data$agediag) + 1.0*(data$sex) + 
+        1.0*(data$dep) + 1.0*(data$cmb) + 1.0*(data$death)
+      data$p.miss <- (exp(betas))/(1+exp(betas));     summary(data$p.miss)
+      data$i.miss <- rbinom(1:n,1, prob=data$p.miss);    prop.table(table(data$i.miss))
+      miss.prop <- (plyr::round_any(mean(data$i.miss), accuracy=0.01, f = round))*100; miss.prop
+      for (k in p.stage) {
+        if (miss.prop==(k) ) {  
+          data <- stage.omar(n, betas)
         }
-        print(paste0('Stage prevalence ', y ,'%: ', 'missing data simulation ', count, ' done'))
+      }
+      data <- data[, !duplicated(colnames(data))]
+    }
+    print(paste0('Missing data for simulation ', i , ' generated'))
+    end_time <- Sys.time()
+    end_time - start_time
+    
+    # Duplicate the data
+    data2 <- data  
+    print(paste0('Data duplicated'))
+    
+    # Redefine the variables as factors
+    data2$stage.var  <- as.factor(data2[[paste0("stage.omar.20.", i)]])      # Stage variable
+    
+    
+  ########################
+  # Complete case analysis
+  ########################
+    
+    # Check the results of the partially observed data
+    CCAmodel.1   <- glm( death ~ treat + agediag + sex + dep + cmb + stage.var + IntStageCmb,
+                         data = data2, family = "binomial"); summary(CCAmodel.1); exp(CCAmodel.1$coefficients[-1])
+    
+    CCAmodel.1a <- glm( death ~ treat + agediag + sex + dep + cmb + stage.var + cmb*stage.var,
+                        data = data2, family = "binomial"); summary(CCAmodel.1a); exp(CCAmodel.1a$coefficients[-1])
+    print(paste0('Complete case analysis model done'))
+    
+    
+  ####################
+  # Passive imputation
+  ####################
+    
+    # Specify the variables to be used in the imputation
+    data2 <- data2[,c('death','treat','agediag','sex','dep','cmb','stage.var')]
+    
+    # Perform passive imputation
+    pass.imp <- mice(data2, meth = c('','','','','','','logreg'), m=m, maxit = maxit, seed = i)  # Perform passive imputation
+    
+    # For each imputed data set, create the interaction variable based on stage*comorbidity
+    pass.imp.data <- list()
+    for (j in 1:m) {
+      pass.imp.data[[j]] <- complete(pass.imp, j)
+      pass.imp.data[[j]]$stage.var <- as.numeric(pass.imp.data[[j]]$stage.var)
+      pass.imp.data[[j]]$stage.var <- pass.imp.data[[j]]$stage.var - 1
+      pass.imp.data[[j]]$IntStageCmb <- pass.imp.data[[j]]$cmb * as.numeric(pass.imp.data[[j]]$stage.var)
+    }
+    
+    # For this simulation, obtain the coefficients for each of the imputed data sets
+    pass.imp.fit <- list()
+    for (j in 1:m) {  
+      invisible(capture.output(pass.imp.fit.j <- glm(death ~ treat + agediag + sex + dep + cmb + stage.var + IntStageCmb,
+                                                     data = pass.imp.data[[j]], family = "binomial") 
+      ))
+      pass.imp.fit[[j]] <- pass.imp.fit.j
+      print(paste0("Model ", j, " done"))
+    }  
+    
+    # Within this simulation, combine the estimates
+    pass.sim.coef <- MIextract(pass.imp.fit, fun = coef);  pass.sim.coef
+    pass.sim.var  <- MIextract(pass.imp.fit, fun = function(x) diag(vcov(x)));  pass.sim.var
+    pass.sim.est <- MIcombine(pass.sim.coef, pass.sim.var); pass.sim.est
+    
+    # Add the results to the estimates data set
+    estimates1 <- data.frame(Rep = i, 
+                             Cmb = pass.sim.est[["coefficients"]][["cmb"]],
+                             Stage = pass.sim.est[["coefficients"]][["stage.var"]],
+                             Int = pass.sim.est[["coefficients"]][["IntStageCmb"]],
+                             CmbSE = pass.sim.est[["variance"]][6,6],
+                             StageSE = pass.sim.est[["variance"]][7,7],
+                             IntSE = pass.sim.est[["variance"]][8,8],
+                             DGM = 2,
+                             Method = 'Passive'
+    )
+    estimates <- rbind(estimates, estimates1)
+    
+    # State the completion of the simulation
+    print(paste0('Passive imputation: ', 'simulation ', i, ' done'))
+    
+    
+    
+  #######################  
+  # Just another variable
+  #######################
+    
+    # Obtain the data
+    data2 <- data
+    
+    # Rename the variables of interest
+    data2$stage.var  <- data2[[paste0("stage.omar.20.", i)]]      # Stage variable
+    
+    # Recode the interaction variable (because it must be missing when stage is missing)
+    data2$IntStageCmb <- data2$cmb * data2$stage.var
+    
+    # Convert to factor variables
+    data2$stage.var <- as.factor(data2$stage.var)
+    data2$IntStageCmb <- as.factor(data2$IntStageCmb) 
+    
+    # Specify the variables to be used in the imputation
+    data2 <- data2[,c('death','treat','agediag','sex','dep','cmb','stage.var','IntStageCmb')]
+    
+    # Perform passive imputation
+    jav.imp <- mice(data2, meth = c('','','','','','','logreg','logreg'), m=m, maxit = maxit, seed = i)  # Perform passive imputation
+    
+    # Extract the imputed data sets
+    jav.imp.data <- list()
+    for (j in 1:m) {
+      jav.imp.data[[j]] <- complete(jav.imp,j)
+      
+      jav.imp.data[[j]]$stage.var   <- as.numeric(jav.imp.data[[j]]$stage.var)
+      jav.imp.data[[j]]$IntStageCmb <- as.numeric(jav.imp.data[[j]]$IntStageCmb)
+      
+      jav.imp.data[[j]]$stage.var   <- jav.imp.data[[j]]$stage.var - 1
+      jav.imp.data[[j]]$IntStageCmb <- jav.imp.data[[j]]$IntStageCmb - 1
+      
+      #print(head(jav.imp.data[[j]][is.na(data$stage.var), ], 10))
+    }
+    
+    # Obtain coefficients for each of the data sets
+    jav.imp.fit <- list()
+    for (j in 1:m) {  
+      invisible(capture.output(jav.imp.fit.j <- glm(death ~ treat + agediag + sex + dep + cmb + stage.var + IntStageCmb,
+                                                    data = jav.imp.data[[j]], family = "binomial")
+      ))
+      jav.imp.fit[[j]] <- jav.imp.fit.j
+      print(paste0("Model ", j, " done"))
+    }
+    
+    # Within this simulation, combine the estimates
+    jav.sim.coef <- MIextract(jav.imp.fit, fun = coef);  jav.sim.coef
+    jav.sim.var  <- MIextract(jav.imp.fit, fun = function(x) diag(vcov(x)));  jav.sim.var
+    jav.sim.est  <- MIcombine(jav.sim.coef, jav.sim.var); jav.sim.est
+    
+    # Add the results to the estimates data set
+    estimates1 <- data.frame(Rep = i, 
+                             Cmb = jav.sim.est[["coefficients"]][["cmb"]],
+                             Stage = jav.sim.est[["coefficients"]][["stage.var"]],
+                             Int = jav.sim.est[["coefficients"]][["IntStageCmb"]],
+                             CmbSE = jav.sim.est[["variance"]][6,6],
+                             StageSE = jav.sim.est[["variance"]][7,7],
+                             IntSE = jav.sim.est[["variance"]][8,8],
+                             DGM = 2,
+                             Method = 'JAV'
+    )
+    estimates <- rbind(estimates, estimates1)
+    
+    # State the completion of the simulation
+    print(paste0('JAV imputation: ', 'simulation ', i, ' done'))
+    
+    
+  ########################
+  # Stratify-impute-append
+  ########################
+    
+    
+    # Obtain the data
+    data2 <- data
+    
+    # Redefine the variables as factors
+    data2$stage.var  <- as.factor(data2[[paste0("stage.omar.20.", i)]])      # Stage variable
+    
+    # Specify the variables to be used in the imputation
+    data2 <- data2[,c('death','treat','agediag','sex','dep','cmb','stage.var')]
+    
+    # Stratify the data by levels of comorbidity
+    # For those without comorbidity
+    data2.cmb0 <- data2[data2$cmb == 0,]
+    data2.cmb0 <- subset(data2.cmb0, select = -(cmb))
+    # For those with comorbidity
+    data2.cmb1 <- data2[data2$cmb == 1,]
+    data2.cmb1 <- subset(data2.cmb1, select = -(cmb))  
+    
+    # Separately for each strata of comorbidity, impute the partially observed variables  
+    # For those without comorbidity
+    # Impute
+    sia.imp.cmb0 <- mice(data2.cmb0, meth = c('','','','','','logreg'), 
+                         m=m, maxit = maxit, seed = i)  # Perform passive imputation    
+    # State the completion of the imputation for cmb0
+    print(paste0("Imputation for Cmb0 done"))
+    
+    # For those with comorbidity
+    #Impute
+    sia.imp.cmb1 <- mice(data2.cmb1, meth = c('','','','','','logreg'), 
+                         m=m, maxit = maxit, seed = i)  # Perform passive imputation    
+    # State the completion of the imputation for cmb1
+    print(paste0("Imputation for Cmb1 done"))
+    
+    # For each imputed data set, create the interaction variable based on stage*comorbidity
+    sia.imp.cmb0.data <- list()
+    sia.imp.cmb1.data <- list()
+    for (j in 1:m) {
+      # For those without comorbidity
+      sia.imp.cmb0.data[[j]] <- complete(sia.imp.cmb0, j)
+      
+      sia.imp.cmb0.data[[j]]$cmb <- 0
+      
+      sia.imp.cmb0.data[[j]]$stage.var <- as.numeric(sia.imp.cmb0.data[[j]]$stage.var)
+      
+      sia.imp.cmb0.data[[j]]$stage.var <- sia.imp.cmb0.data[[j]]$stage.var - 1
+      
+      sia.imp.cmb0.data[[j]]$IntStageCmb <- sia.imp.cmb0.data[[j]]$cmb * sia.imp.cmb0.data[[j]]$stage.var
+      
+      # For those with comorbidity
+      sia.imp.cmb1.data[[j]] <- complete(sia.imp.cmb1, j)
+      
+      sia.imp.cmb1.data[[j]]$cmb <- 1
+      
+      sia.imp.cmb1.data[[j]]$stage.var <- as.numeric(sia.imp.cmb1.data[[j]]$stage.var)
+      
+      sia.imp.cmb1.data[[j]]$stage.var <- sia.imp.cmb1.data[[j]]$stage.var - 1
+      
+      sia.imp.cmb1.data[[j]]$IntStageCmb <- sia.imp.cmb1.data[[j]]$cmb * sia.imp.cmb1.data[[j]]$stage.var
+    }
+    
+    # Append the imputed data sets for the two strata (giving K imputed data sets)
+    sia.sim.cmb.data.merge <- list()
+    for (j in 1:m) {
+      sia.sim.cmb.data.merge[[j]] <- rbind(sia.imp.cmb0.data[[j]], sia.imp.cmb1.data[[j]])
+    }
+    
+    # Obtain coefficients for each of the data sets
+    sia.imp.fit <- list()
+    for (j in 1:m) {  
+      invisible(capture.output(sia.imp.fit.j <- glm(death ~ treat + agediag + sex + dep + cmb + stage.var + IntStageCmb,
+                                                    data = sia.sim.cmb.data.merge[[j]], family = "binomial") #; summary(sia.imp.fit.i)
+      ))
+      sia.imp.fit[[j]] <- sia.imp.fit.j
+      print(paste0("Model ", j, " done"))
+    }    
+    
+    # Within each simulation, combine the estimates
+    print(paste0("Combining estimates"))
+    sia.sim.coef <- MIextract(sia.imp.fit, fun = coef);  sia.sim.coef
+    sia.sim.var  <- MIextract(sia.imp.fit, fun = function(x) diag(vcov(x)));  sia.sim.var
+    sia.sim.est  <- MIcombine(sia.sim.coef, sia.sim.var); sia.sim.est
+    
+    # Add the results to the estimates data set
+    estimates1 <- data.frame(Rep = i, 
+                             Cmb = sia.sim.est[["coefficients"]][["cmb"]],
+                             Stage = sia.sim.est[["coefficients"]][["stage.var"]],
+                             Int = sia.sim.est[["coefficients"]][["IntStageCmb"]],
+                             CmbSE = sia.sim.est[["variance"]][6,6],
+                             StageSE = sia.sim.est[["variance"]][7,7],
+                             IntSE = sia.sim.est[["variance"]][8,8],
+                             DGM = 2,
+                             Method = 'SIA'
+    )
+    estimates <- rbind(estimates, estimates1)
+    
+    # State the completion of this simulation
+    print(paste0('SIA imputation: ', 'simulation ', i, ' done'))
+    
+    
+  ####################################
+  # SMC-FCS
+  ####################################
+    
+    # Obtain the data
+    data2 <- data
+    
+    # Redefine the variables as factors
+    data2$stage.var  <- as.factor(data2[[paste0("stage.omar.20.", i)]])      # Stage variable
+    
+    # Specify the variables to be used in the imputation
+    data.subset <- data2[,c('death','treat','agediag','sex','dep','cmb','stage.var')]
+    
+    # Perform imputation on the variables ("SMC-FCS")
+    smcfcs.imp <- smcfcs(data.subset, smtype = 'logistic', 
+                         smformula = 'death ~ treat + agediag + sex + dep + cmb + stage.var + cmb*stage.var',
+                         method = c('','','','','','','logreg'), m=m, numit=numit) 
+    
+    # Fit substantive model
+    smcfcslist <- imputationList(smcfcs.imp$impDatasets)
+    smcfcs.models <- with(smcfcslist, glm(death ~ treat + agediag + sex + dep + 
+                                            cmb + stage.var + cmb*stage.var, family = 'binomial'))  
+    smcfcs.sim.est <- MIcombine(smcfcs.models); smcfcs.sim.est
+    
+    # Add the results to the estimates data set
+    estimates1 <- data.frame(Rep = i, 
+                             Cmb = smcfcs.sim.est[["coefficients"]][["cmb"]],
+                             Stage = smcfcs.sim.est[["coefficients"]][["stage.var1"]],
+                             Int = smcfcs.sim.est[["coefficients"]][["cmb:stage.var1"]],
+                             CmbSE = smcfcs.sim.est[["variance"]][6,6],
+                             StageSE = smcfcs.sim.est[["variance"]][7,7],
+                             IntSE = smcfcs.sim.est[["variance"]][8,8],
+                             DGM = 2,
+                             Method = 'SMCFCS'
+    )
+    estimates <- rbind(estimates, estimates1)
+    
+    # State the completion of this simulation
+    print(paste0('SMCFCS imputation: ', 'simulation ', i, ' done'))
+    
   }
-      end_time <- Sys.time()
-      end_time - start_time
-      
-      # Check the distribution and number of missing values in the partially observed stage variables
-        #for (i in n.sim) {
-        #  print(summary(data[[paste0("stage.omar.40.", i)]]))
-        #}
-      
-      # Duplicate the data
-      data2 <- data  
 
+
+
+
+
+########################################################################################################################
+# Scenario 3: High Odds Ratio
+# MAR, binary Z, 30% pZ, 20% missing X, OR = 1.7
+########################################################################################################################
+
+
+
+# Specify criteria for this scenario
+  beta.int <- 1.7   # Effect of interaction (i.e., OR = 1.3)
+  prob.cmb <- 0.3   # Prevalence of fully observed variable in interaction
+  z <- 20           # Proportion of missing data in stage variable
+
+
+# Start the loop through the simulations...
+  for (i in n.sim) {
     
-    ##################################### 
+    # Set the seed
+    seed <- i
+    
+    # Generate the data
+    data <- sim.dt(n = 100000, seed = i, probcmb = prob.cmb,
+                   treatef = 0.85, ageef = 1.3, sexef = 0.9, depef = 1.2, 
+                   cmbef = 0.9, stageef = 1.4, IntStageCmbef = beta.int)
+    print(paste0('Data for simulation ', i ,' generated'))
+    
+    # Generate some missing data
+    n <- length(data$agediag)
+    p.stage  <- c(z)
+    z.stage <- seq(-5.0, -0.0, 0.01)
+    
+    # Outcome-dependent missing at random for Stage
+    stage.omar <- function(n, betas) {
+      data$p.miss <- (exp(betas))/(1+exp(betas));     summary(data$p.miss)
+      data$i.miss <- rbinom(1:n,1, prob=data$p.miss);    prop.table(table(data$i.miss))
+      miss.prop <- (plyr::round_any(mean(data$i.miss), accuracy=0.01, f = round))*100; miss.prop
+      col_name <- paste0('stage.omar', '.', miss.prop, '.', i)
+      stage2 <- data.frame(ifelse(data$i.miss==1, NA, data$stage))
+      colnames(stage2) <- col_name
+      data <- cbind(data,stage2)
+      return(data)
+    }
+    
+    count <- 0
+    start_time <- Sys.time()
+    count <- count + 1
+    for (j in z.stage) {
+      betas <- j + 1.0*(data$treat) + 1.0*(data$agediag) + 1.0*(data$sex) + 
+        1.0*(data$dep) + 1.0*(data$cmb) + 1.0*(data$death)
+      data$p.miss <- (exp(betas))/(1+exp(betas));     summary(data$p.miss)
+      data$i.miss <- rbinom(1:n,1, prob=data$p.miss);    prop.table(table(data$i.miss))
+      miss.prop <- (plyr::round_any(mean(data$i.miss), accuracy=0.01, f = round))*100; miss.prop
+      for (k in p.stage) {
+        if (miss.prop==(k) ) {  
+          data <- stage.omar(n, betas)
+        }
+      }
+      data <- data[, !duplicated(colnames(data))]
+    }
+    print(paste0('Missing data for simulation ', i , ' generated'))
+    end_time <- Sys.time()
+    end_time - start_time
+    
+    # Duplicate the data
+    data2 <- data  
+    print(paste0('Data duplicated'))
+    
+    # Redefine the variables as factors
+    data2$stage.var  <- as.factor(data2[[paste0("stage.omar.20.", i)]])      # Stage variable
+    
+    
+  ########################
+  # Complete case analysis
+  ########################
+    
+    # Check the results of the partially observed data
+    CCAmodel.1   <- glm( death ~ treat + agediag + sex + dep + cmb + stage.var + IntStageCmb,
+                         data = data2, family = "binomial"); summary(CCAmodel.1); exp(CCAmodel.1$coefficients[-1])
+    
+    CCAmodel.1a <- glm( death ~ treat + agediag + sex + dep + cmb + stage.var + cmb*stage.var,
+                        data = data2, family = "binomial"); summary(CCAmodel.1a); exp(CCAmodel.1a$coefficients[-1])
+    print(paste0('Complete case analysis model done'))
+    
+    
+  ####################
+  # Passive imputation
+  ####################
+    
+    # Specify the variables to be used in the imputation
+    data2 <- data2[,c('death','treat','agediag','sex','dep','cmb','stage.var')]
+    
+    # Perform passive imputation
+    pass.imp <- mice(data2, meth = c('','','','','','','logreg'), m=m, maxit = maxit, seed = i)  # Perform passive imputation
+    
+    # For each imputed data set, create the interaction variable based on stage*comorbidity
+    pass.imp.data <- list()
+    for (j in 1:m) {
+      pass.imp.data[[j]] <- complete(pass.imp, j)
+      pass.imp.data[[j]]$stage.var <- as.numeric(pass.imp.data[[j]]$stage.var)
+      pass.imp.data[[j]]$stage.var <- pass.imp.data[[j]]$stage.var - 1
+      pass.imp.data[[j]]$IntStageCmb <- pass.imp.data[[j]]$cmb * as.numeric(pass.imp.data[[j]]$stage.var)
+    }
+    
+    # For this simulation, obtain the coefficients for each of the imputed data sets
+    pass.imp.fit <- list()
+    for (j in 1:m) {  
+      invisible(capture.output(pass.imp.fit.j <- glm(death ~ treat + agediag + sex + dep + cmb + stage.var + IntStageCmb,
+                                                     data = pass.imp.data[[j]], family = "binomial") 
+      ))
+      pass.imp.fit[[j]] <- pass.imp.fit.j
+      print(paste0("Model ", j, " done"))
+    }  
+    
+    # Within this simulation, combine the estimates
+    pass.sim.coef <- MIextract(pass.imp.fit, fun = coef);  pass.sim.coef
+    pass.sim.var  <- MIextract(pass.imp.fit, fun = function(x) diag(vcov(x)));  pass.sim.var
+    pass.sim.est <- MIcombine(pass.sim.coef, pass.sim.var); pass.sim.est
+    
+    # Add the results to the estimates data set
+    estimates1 <- data.frame(Rep = i, 
+                             Cmb = pass.sim.est[["coefficients"]][["cmb"]],
+                             Stage = pass.sim.est[["coefficients"]][["stage.var"]],
+                             Int = pass.sim.est[["coefficients"]][["IntStageCmb"]],
+                             CmbSE = pass.sim.est[["variance"]][6,6],
+                             StageSE = pass.sim.est[["variance"]][7,7],
+                             IntSE = pass.sim.est[["variance"]][8,8],
+                             DGM = 3,
+                             Method = 'Passive'
+    )
+    estimates <- rbind(estimates, estimates1)
+    
+    # State the completion of the simulation
+    print(paste0('Passive imputation: ', 'simulation ', i, ' done'))
+    
+    
+    
+  #######################  
+  # Just another variable
+  #######################
+    
+    # Obtain the data
+    data2 <- data
+    
+    # Rename the variables of interest
+    data2$stage.var  <- data2[[paste0("stage.omar.20.", i)]]      # Stage variable
+    
+    # Recode the interaction variable (because it must be missing when stage is missing)
+    data2$IntStageCmb <- data2$cmb * data2$stage.var
+    
+    # Convert to factor variables
+    data2$stage.var <- as.factor(data2$stage.var)
+    data2$IntStageCmb <- as.factor(data2$IntStageCmb) 
+    
+    # Specify the variables to be used in the imputation
+    data2 <- data2[,c('death','treat','agediag','sex','dep','cmb','stage.var','IntStageCmb')]
+    
+    # Perform passive imputation
+    jav.imp <- mice(data2, meth = c('','','','','','','logreg','logreg'), m=m, maxit = maxit, seed = i)  # Perform passive imputation
+    
+    # Extract the imputed data sets
+    jav.imp.data <- list()
+    for (j in 1:m) {
+      jav.imp.data[[j]] <- complete(jav.imp,j)
+      
+      jav.imp.data[[j]]$stage.var   <- as.numeric(jav.imp.data[[j]]$stage.var)
+      jav.imp.data[[j]]$IntStageCmb <- as.numeric(jav.imp.data[[j]]$IntStageCmb)
+      
+      jav.imp.data[[j]]$stage.var   <- jav.imp.data[[j]]$stage.var - 1
+      jav.imp.data[[j]]$IntStageCmb <- jav.imp.data[[j]]$IntStageCmb - 1
+      
+      #print(head(jav.imp.data[[j]][is.na(data$stage.var), ], 10))
+    }
+    
+    # Obtain coefficients for each of the data sets
+    jav.imp.fit <- list()
+    for (j in 1:m) {  
+      invisible(capture.output(jav.imp.fit.j <- glm(death ~ treat + agediag + sex + dep + cmb + stage.var + IntStageCmb,
+                                                    data = jav.imp.data[[j]], family = "binomial")
+      ))
+      jav.imp.fit[[j]] <- jav.imp.fit.j
+      print(paste0("Model ", j, " done"))
+    }
+    
+    # Within this simulation, combine the estimates
+    jav.sim.coef <- MIextract(jav.imp.fit, fun = coef);  jav.sim.coef
+    jav.sim.var  <- MIextract(jav.imp.fit, fun = function(x) diag(vcov(x)));  jav.sim.var
+    jav.sim.est  <- MIcombine(jav.sim.coef, jav.sim.var); jav.sim.est
+    
+    # Add the results to the estimates data set
+    estimates1 <- data.frame(Rep = i, 
+                             Cmb = jav.sim.est[["coefficients"]][["cmb"]],
+                             Stage = jav.sim.est[["coefficients"]][["stage.var"]],
+                             Int = jav.sim.est[["coefficients"]][["IntStageCmb"]],
+                             CmbSE = jav.sim.est[["variance"]][6,6],
+                             StageSE = jav.sim.est[["variance"]][7,7],
+                             IntSE = jav.sim.est[["variance"]][8,8],
+                             DGM = 3,
+                             Method = 'JAV'
+    )
+    estimates <- rbind(estimates, estimates1)
+    
+    # State the completion of the simulation
+    print(paste0('JAV imputation: ', 'simulation ', i, ' done'))
+    
+    
+  ########################
+  # Stratify-impute-append
+  ########################
+    
+    
+    # Obtain the data
+    data2 <- data
+    
+    # Redefine the variables as factors
+    data2$stage.var  <- as.factor(data2[[paste0("stage.omar.20.", i)]])      # Stage variable
+    
+    # Specify the variables to be used in the imputation
+    data2 <- data2[,c('death','treat','agediag','sex','dep','cmb','stage.var')]
+    
+    # Stratify the data by levels of comorbidity
+    # For those without comorbidity
+    data2.cmb0 <- data2[data2$cmb == 0,]
+    data2.cmb0 <- subset(data2.cmb0, select = -(cmb))
+    # For those with comorbidity
+    data2.cmb1 <- data2[data2$cmb == 1,]
+    data2.cmb1 <- subset(data2.cmb1, select = -(cmb))  
+    
+    # Separately for each strata of comorbidity, impute the partially observed variables  
+    # For those without comorbidity
+    # Impute
+    sia.imp.cmb0 <- mice(data2.cmb0, meth = c('','','','','','logreg'), 
+                         m=m, maxit = maxit, seed = i)  # Perform passive imputation    
+    # State the completion of the imputation for cmb0
+    print(paste0("Imputation for Cmb0 done"))
+    
+    # For those with comorbidity
+    #Impute
+    sia.imp.cmb1 <- mice(data2.cmb1, meth = c('','','','','','logreg'), 
+                         m=m, maxit = maxit, seed = i)  # Perform passive imputation    
+    # State the completion of the imputation for cmb1
+    print(paste0("Imputation for Cmb1 done"))
+    
+    # For each imputed data set, create the interaction variable based on stage*comorbidity
+    sia.imp.cmb0.data <- list()
+    sia.imp.cmb1.data <- list()
+    for (j in 1:m) {
+      # For those without comorbidity
+      sia.imp.cmb0.data[[j]] <- complete(sia.imp.cmb0, j)
+      
+      sia.imp.cmb0.data[[j]]$cmb <- 0
+      
+      sia.imp.cmb0.data[[j]]$stage.var <- as.numeric(sia.imp.cmb0.data[[j]]$stage.var)
+      
+      sia.imp.cmb0.data[[j]]$stage.var <- sia.imp.cmb0.data[[j]]$stage.var - 1
+      
+      sia.imp.cmb0.data[[j]]$IntStageCmb <- sia.imp.cmb0.data[[j]]$cmb * sia.imp.cmb0.data[[j]]$stage.var
+      
+      # For those with comorbidity
+      sia.imp.cmb1.data[[j]] <- complete(sia.imp.cmb1, j)
+      
+      sia.imp.cmb1.data[[j]]$cmb <- 1
+      
+      sia.imp.cmb1.data[[j]]$stage.var <- as.numeric(sia.imp.cmb1.data[[j]]$stage.var)
+      
+      sia.imp.cmb1.data[[j]]$stage.var <- sia.imp.cmb1.data[[j]]$stage.var - 1
+      
+      sia.imp.cmb1.data[[j]]$IntStageCmb <- sia.imp.cmb1.data[[j]]$cmb * sia.imp.cmb1.data[[j]]$stage.var
+    }
+    
+    # Append the imputed data sets for the two strata (giving K imputed data sets)
+    sia.sim.cmb.data.merge <- list()
+    for (j in 1:m) {
+      sia.sim.cmb.data.merge[[j]] <- rbind(sia.imp.cmb0.data[[j]], sia.imp.cmb1.data[[j]])
+    }
+    
+    # Obtain coefficients for each of the data sets
+    sia.imp.fit <- list()
+    for (j in 1:m) {  
+      invisible(capture.output(sia.imp.fit.j <- glm(death ~ treat + agediag + sex + dep + cmb + stage.var + IntStageCmb,
+                                                    data = sia.sim.cmb.data.merge[[j]], family = "binomial") #; summary(sia.imp.fit.i)
+      ))
+      sia.imp.fit[[j]] <- sia.imp.fit.j
+      print(paste0("Model ", j, " done"))
+    }    
+    
+    # Within each simulation, combine the estimates
+    print(paste0("Combining estimates"))
+    sia.sim.coef <- MIextract(sia.imp.fit, fun = coef);  sia.sim.coef
+    sia.sim.var  <- MIextract(sia.imp.fit, fun = function(x) diag(vcov(x)));  sia.sim.var
+    sia.sim.est  <- MIcombine(sia.sim.coef, sia.sim.var); sia.sim.est
+    
+    # Add the results to the estimates data set
+    estimates1 <- data.frame(Rep = i, 
+                             Cmb = sia.sim.est[["coefficients"]][["cmb"]],
+                             Stage = sia.sim.est[["coefficients"]][["stage.var"]],
+                             Int = sia.sim.est[["coefficients"]][["IntStageCmb"]],
+                             CmbSE = sia.sim.est[["variance"]][6,6],
+                             StageSE = sia.sim.est[["variance"]][7,7],
+                             IntSE = sia.sim.est[["variance"]][8,8],
+                             DGM = 3,
+                             Method = 'SIA'
+    )
+    estimates <- rbind(estimates, estimates1)
+    
+    # State the completion of this simulation
+    print(paste0('SIA imputation: ', 'simulation ', i, ' done'))
+    
+    
+  ####################################
+  # SMC-FCS
+  ####################################
+    
+    # Obtain the data
+    data2 <- data
+    
+    # Redefine the variables as factors
+    data2$stage.var  <- as.factor(data2[[paste0("stage.omar.20.", i)]])      # Stage variable
+    
+    # Specify the variables to be used in the imputation
+    data.subset <- data2[,c('death','treat','agediag','sex','dep','cmb','stage.var')]
+    
+    # Perform imputation on the variables ("SMC-FCS")
+    smcfcs.imp <- smcfcs(data.subset, smtype = 'logistic', 
+                         smformula = 'death ~ treat + agediag + sex + dep + cmb + stage.var + cmb*stage.var',
+                         method = c('','','','','','','logreg'), m=m, numit=numit) 
+    
+    # Fit substantive model
+    smcfcslist <- imputationList(smcfcs.imp$impDatasets)
+    smcfcs.models <- with(smcfcslist, glm(death ~ treat + agediag + sex + dep + 
+                                            cmb + stage.var + cmb*stage.var, family = 'binomial'))  
+    smcfcs.sim.est <- MIcombine(smcfcs.models); smcfcs.sim.est
+    
+    # Add the results to the estimates data set
+    estimates1 <- data.frame(Rep = i, 
+                             Cmb = smcfcs.sim.est[["coefficients"]][["cmb"]],
+                             Stage = smcfcs.sim.est[["coefficients"]][["stage.var1"]],
+                             Int = smcfcs.sim.est[["coefficients"]][["cmb:stage.var1"]],
+                             CmbSE = smcfcs.sim.est[["variance"]][6,6],
+                             StageSE = smcfcs.sim.est[["variance"]][7,7],
+                             IntSE = smcfcs.sim.est[["variance"]][8,8],
+                             DGM = 3,
+                             Method = 'SMCFCS'
+    )
+    estimates <- rbind(estimates, estimates1)
+    
+    # State the completion of this simulation
+    print(paste0('SMCFCS imputation: ', 'simulation ', i, ' done'))
+    
+  }
+
+
+
+
+########################################################################################################################
+# Scenario 4: MCAR
+# MCAR, binary Z, 30% pZ, 20% missing X, OR = 1.3
+########################################################################################################################
+
+
+# Specify criteria for this scenario
+  beta.int <- 1.3   # Effect of interaction (i.e., OR = 1.3)
+  prob.cmb <- 0.3   # Prevalence of fully observed variable in interaction
+  z <- 20           # Proportion of missing data in stage variable
+
+
+  # Start the loop through the simulations...
+  for (i in n.sim) {
+    
+    # Set the seed
+    seed <- i
+    
+    # Generate the data
+    data <- sim.dt(n = 100000, seed = i, probcmb = prob.cmb,
+                   treatef = 0.85, ageef = 1.3, sexef = 0.9, depef = 1.2, 
+                   cmbef = 0.9, stageef = 1.4, IntStageCmbef = beta.int)
+    print(paste0('Data for simulation ', i ,' generated'))
+    
+    # Generate some missing data
+    n <- length(data$agediag)
+    p.stage  <- c(z)
+    z.stage <- seq(-5.0, -0.0, 0.01)
+    
+    # MCAR mechanism
+      data$p.miss <- (z/100)
+      data$i.miss <- runif(n,0,1)
+      col_name <- paste0('stage.mcar.20.', i) 
+      stage2 <- data.frame(ifelse(data$i.miss<data$p.miss, NA, data$stage))
+      colnames(stage2) <- col_name
+      data <- cbind(data,stage2)
+      data <- data[, !duplicated(colnames(data))]
+      print(paste0('Missing data for simulation ', i , ' generated'))
+    
+    # Duplicate the data
+    data2 <- data  
+    print(paste0('Data duplicated'))
+    
+    # Redefine the variables as factors
+    data2$stage.var  <- as.factor(data2[[paste0("stage.mcar.20.", i)]])      # Stage variable
+    
+    
+    ########################
     # Complete case analysis
-    #####################################  
+    ########################
     
-      # Check the results of the partially observed data
-      model.2[[y]]   <- glm( death ~ treat + agediag + sex + dep + cmb + stage.omar.40.1 + IntStageCmb,
-                     data = data2, family = "binomial"); summary(model.2[[y]]); exp(model.2[[y]]$coefficients[-1])
-      
-      model.2.1[[y]] <- glm( death ~ treat + agediag + sex + dep + cmb + stage.omar.40.1 + cmb*stage.omar.40.1,
-                       data = data2, family = "binomial"); summary(model.2.1[[y]]); exp(model.2.1[[y]]$coefficients[-1])
+    # Check the results of the partially observed data
+    CCAmodel.1   <- glm( death ~ treat + agediag + sex + dep + cmb + stage.var + IntStageCmb,
+                         data = data2, family = "binomial"); summary(CCAmodel.1); exp(CCAmodel.1$coefficients[-1])
     
-
-
+    CCAmodel.1a <- glm( death ~ treat + agediag + sex + dep + cmb + stage.var + cmb*stage.var,
+                        data = data2, family = "binomial"); summary(CCAmodel.1a); exp(CCAmodel.1a$coefficients[-1])
+    print(paste0('Complete case analysis model done'))
+    
+    
     ####################
     # Passive imputation
     ####################
     
-      # Install necessary packages
-      library(mice)
-      library(tidyr)
-      library(mitools)
-      
-      # Define the initial value for the count
-      count <- 0
-      
-      # Create a data frame to hold the estimates for each simulation
-      pass.all.coef[[y]] <- data.frame(matrix(nrow=1,ncol=8))
-      
-      # Loop through the simulations  
-      for (i in n.sim) {
-        # Set the counter
-        count <- count + 1
-        
-        # Obtain the data
-        data2 <- data
-        
-        # Redefine the variables as factors
-        data2$stage.var  <- as.factor(data2[[paste0("stage.omar.40.", i)]])      # Stage variable
-        
-        # Specify the variables to be used in the imputation
-        data2 <- data2[,c('death','treat','agediag','sex','dep','cmb','stage.var')]
-        
-        # Perform passive imputation
-        pass.imp <- mice(data2, meth = c('','','','','','','logreg'), m=m, maxit = maxit, seed = 1234)  # Perform passive imputation
-        
-        # For each imputed data set, create the interaction variable based on stage*comorbidity
-        pass.imp.data <- list()
-        for (j in 1:m) {
-          pass.imp.data[[j]] <- complete(pass.imp, j)
-          pass.imp.data[[j]]$stage.var <- as.numeric(pass.imp.data[[j]]$stage.var)
-          pass.imp.data[[j]]$stage.var <- pass.imp.data[[j]]$stage.var - 1
-          pass.imp.data[[j]]$IntStageCmb <- pass.imp.data[[j]]$cmb * as.numeric(pass.imp.data[[j]]$stage.var)
-        }
-        
-        # For this simulation, obtain the coefficients for each of the imputed data sets
-        pass.imp.fit <- list()
-        for (j in 1:m) {  
-          invisible(capture.output(pass.imp.fit.j <- glm(death ~ treat + agediag + sex + dep + cmb + stage.var + IntStageCmb,
-                                                         data = pass.imp.data[[j]], family = "binomial") 
-          ))
-          pass.imp.fit[[j]] <- pass.imp.fit.j
-          print(paste0("Model ", j, " done"))
-        }  
-        
-        # Within this simulation, combine the estimates
-        pass.sim.coef <- MIextract(pass.imp.fit, fun = coef);  pass.sim.coef
-        pass.sim.var  <- MIextract(pass.imp.fit, fun = function(x) diag(vcov(x)));  pass.sim.var
-        pass.sim.est <- MIcombine(pass.sim.coef, pass.sim.var)
-        
-        # Save the coefficients from each of the simulations
-        pass.all.coef[[y]][i,] <- pass.sim.est$coefficients
-        
-        # State the completion of the simulation
-        print(paste0('Stage prevalence ', y, '%: ', 'passive imputation: ', 'simulation ', count, ' done'))
-      }
-  
-      
-      # Average of the coefficients across the simulations
-      {
-      pass.mean.coef[[y]]  <-  data.frame(matrix(nrow=1,ncol=8))
-      pass.mean.coef[[y]][1] <- mean(pass.all.coef[[y]]$X1)
-      pass.mean.coef[[y]][2] <- mean(pass.all.coef[[y]]$X2)
-      pass.mean.coef[[y]][3] <- mean(pass.all.coef[[y]]$X3)
-      pass.mean.coef[[y]][4] <- mean(pass.all.coef[[y]]$X4)
-      pass.mean.coef[[y]][5] <- mean(pass.all.coef[[y]]$X5)
-      pass.mean.coef[[y]][6] <- mean(pass.all.coef[[y]]$X6)
-      pass.mean.coef[[y]][7] <- mean(pass.all.coef[[y]]$X7)
-      pass.mean.coef[[y]][8] <- mean(pass.all.coef[[y]]$X8)
-      colnames(pass.mean.coef[[y]]) <- c('Intercept','Treat','Agediag','Sex','Dep','Cmb','Stage','Int')
-      exp(pass.mean.coef[[y]])
-      }
-      #pass.int.coef <- pass.int.coef[complete.cases(pass.int.coef),]
-      #exp(mean(pass.int.coef))             # Average hazard ratio across the simulations: 1.08
-      #pass.t.test <- t.test(pass.int.coef)
-      #exp(pass.t.test$conf.int)
-      
-      
-      # Summarise the results so far
-      #exp(model.1[[y]]$coefficients); exp(model.2[[y]]$coefficients); exp(pass.mean.coef[[y]])
+    # Specify the variables to be used in the imputation
+    data2 <- data2[,c('death','treat','agediag','sex','dep','cmb','stage.var')]
     
-  
-    #######################  
-    # Just another variable
-    #######################
+    # Perform passive imputation
+    pass.imp <- mice(data2, meth = c('','','','','','','logreg'), m=m, maxit = maxit, seed = i)  # Perform passive imputation
     
-      # Install necessary packages
-      library(mice)
-      library(tidyr)
+    # For each imputed data set, create the interaction variable based on stage*comorbidity
+    pass.imp.data <- list()
+    for (j in 1:m) {
+      pass.imp.data[[j]] <- complete(pass.imp, j)
+      pass.imp.data[[j]]$stage.var <- as.numeric(pass.imp.data[[j]]$stage.var)
+      pass.imp.data[[j]]$stage.var <- pass.imp.data[[j]]$stage.var - 1
+      pass.imp.data[[j]]$IntStageCmb <- pass.imp.data[[j]]$cmb * as.numeric(pass.imp.data[[j]]$stage.var)
+    }
+    
+    # For this simulation, obtain the coefficients for each of the imputed data sets
+    pass.imp.fit <- list()
+    for (j in 1:m) {  
+      invisible(capture.output(pass.imp.fit.j <- glm(death ~ treat + agediag + sex + dep + cmb + stage.var + IntStageCmb,
+                                                     data = pass.imp.data[[j]], family = "binomial") 
+      ))
+      pass.imp.fit[[j]] <- pass.imp.fit.j
+      print(paste0("Model ", j, " done"))
+    }  
+    
+    # Within this simulation, combine the estimates
+    pass.sim.coef <- MIextract(pass.imp.fit, fun = coef);  pass.sim.coef
+    pass.sim.var  <- MIextract(pass.imp.fit, fun = function(x) diag(vcov(x)));  pass.sim.var
+    pass.sim.est <- MIcombine(pass.sim.coef, pass.sim.var); pass.sim.est
+    
+    # Add the results to the estimates data set
+    estimates1 <- data.frame(Rep = i, 
+                             Cmb = pass.sim.est[["coefficients"]][["cmb"]],
+                             Stage = pass.sim.est[["coefficients"]][["stage.var"]],
+                             Int = pass.sim.est[["coefficients"]][["IntStageCmb"]],
+                             CmbSE = pass.sim.est[["variance"]][6,6],
+                             StageSE = pass.sim.est[["variance"]][7,7],
+                             IntSE = pass.sim.est[["variance"]][8,8],
+                             DGM = 4,
+                             Method = 'Passive'
+    )
+    estimates <- rbind(estimates, estimates1)
+    
+    # State the completion of the simulation
+    print(paste0('Passive imputation: ', 'simulation ', i, ' done'))
+    
+    
+    
+  #######################  
+  # Just another variable
+  #######################
+    
+    # Obtain the data
+    data2 <- data
+    
+    # Rename the variables of interest
+    data2$stage.var  <- data2[[paste0("stage.mcar.20.", i)]]      # Stage variable
+    
+    # Recode the interaction variable (because it must be missing when stage is missing)
+    data2$IntStageCmb <- data2$cmb * data2$stage.var
+    
+    # Convert to factor variables
+    data2$stage.var <- as.factor(data2$stage.var)
+    data2$IntStageCmb <- as.factor(data2$IntStageCmb) 
+    
+    # Specify the variables to be used in the imputation
+    data2 <- data2[,c('death','treat','agediag','sex','dep','cmb','stage.var','IntStageCmb')]
+    
+    # Perform passive imputation
+    jav.imp <- mice(data2, meth = c('','','','','','','logreg','logreg'), m=m, maxit = maxit, seed = i)  # Perform passive imputation
+    
+    # Extract the imputed data sets
+    jav.imp.data <- list()
+    for (j in 1:m) {
+      jav.imp.data[[j]] <- complete(jav.imp,j)
       
-      # Define the initial value for the count
-      count <- 0
+      jav.imp.data[[j]]$stage.var   <- as.numeric(jav.imp.data[[j]]$stage.var)
+      jav.imp.data[[j]]$IntStageCmb <- as.numeric(jav.imp.data[[j]]$IntStageCmb)
       
-      # Create the data frame to hold the results of the simulations
-      jav.all.coef[[y]] <- data.frame(matrix(nrow=1,ncol=8))
+      jav.imp.data[[j]]$stage.var   <- jav.imp.data[[j]]$stage.var - 1
+      jav.imp.data[[j]]$IntStageCmb <- jav.imp.data[[j]]$IntStageCmb - 1
       
-      # Loop through the simulations  
-      for (i in n.sim) {
-        # Set the counter
-        count <- count + 1
-        
-        # Obtain the data
-        data2 <- data
-        
-        # Rename the variables of interest
-        data2$stage.var  <- data2[[paste0("stage.omar.40.", i)]]      # Stage variable
-        
-        # Recode the interaction variable (because it must be missing when stage is missing)
-        data2$IntStageCmb <- data2$cmb * data2$stage.var
-        
-        # Convert to factor variables
-        data2$stage.var <- as.factor(data2$stage.var)
-        data2$IntStageCmb <- as.factor(data2$IntStageCmb) 
-        
-        # Specify the variables to be used in the imputation
-        data2 <- data2[,c('death','treat','agediag','sex','dep','cmb','stage.var','IntStageCmb')]
-        
-        # Perform passive imputation
-        jav.imp <- mice(data2, meth = c('','','','','','','logreg','logreg'), m=m, maxit = maxit, seed = 1234)  # Perform passive imputation
-        
-        # Extract the imputed data sets
-        jav.imp.data <- list()
-        for (j in 1:m) {
-          jav.imp.data[[j]] <- complete(jav.imp,j)
-          
-          jav.imp.data[[j]]$stage.var   <- as.numeric(jav.imp.data[[j]]$stage.var)
-          jav.imp.data[[j]]$IntStageCmb <- as.numeric(jav.imp.data[[j]]$IntStageCmb)
-          
-          jav.imp.data[[j]]$stage.var   <- jav.imp.data[[j]]$stage.var - 1
-          jav.imp.data[[j]]$IntStageCmb <- jav.imp.data[[j]]$IntStageCmb - 1
-          
-          #print(head(jav.imp.data[[j]][is.na(data$stage.var), ], 10))
+      #print(head(jav.imp.data[[j]][is.na(data$stage.var), ], 10))
+    }
+    
+    # Obtain coefficients for each of the data sets
+    jav.imp.fit <- list()
+    for (j in 1:m) {  
+      invisible(capture.output(jav.imp.fit.j <- glm(death ~ treat + agediag + sex + dep + cmb + stage.var + IntStageCmb,
+                                                    data = jav.imp.data[[j]], family = "binomial")
+      ))
+      jav.imp.fit[[j]] <- jav.imp.fit.j
+      print(paste0("Model ", j, " done"))
+    }
+    
+    # Within this simulation, combine the estimates
+    jav.sim.coef <- MIextract(jav.imp.fit, fun = coef);  jav.sim.coef
+    jav.sim.var  <- MIextract(jav.imp.fit, fun = function(x) diag(vcov(x)));  jav.sim.var
+    jav.sim.est  <- MIcombine(jav.sim.coef, jav.sim.var); jav.sim.est
+    
+    # Add the results to the estimates data set
+    estimates1 <- data.frame(Rep = i, 
+                             Cmb = jav.sim.est[["coefficients"]][["cmb"]],
+                             Stage = jav.sim.est[["coefficients"]][["stage.var"]],
+                             Int = jav.sim.est[["coefficients"]][["IntStageCmb"]],
+                             CmbSE = jav.sim.est[["variance"]][6,6],
+                             StageSE = jav.sim.est[["variance"]][7,7],
+                             IntSE = jav.sim.est[["variance"]][8,8],
+                             DGM = 4,
+                             Method = 'JAV'
+    )
+    estimates <- rbind(estimates, estimates1)
+    
+    # State the completion of the simulation
+    print(paste0('JAV imputation: ', 'simulation ', i, ' done'))
+    
+    
+  ########################
+  # Stratify-impute-append
+  ########################
+    
+    
+    # Obtain the data
+    data2 <- data
+    
+    # Redefine the variables as factors
+    data2$stage.var  <- as.factor(data2[[paste0("stage.mcar.20.", i)]])      # Stage variable
+    
+    # Specify the variables to be used in the imputation
+    data2 <- data2[,c('death','treat','agediag','sex','dep','cmb','stage.var')]
+    
+    # Stratify the data by levels of comorbidity
+    # For those without comorbidity
+    data2.cmb0 <- data2[data2$cmb == 0,]
+    data2.cmb0 <- subset(data2.cmb0, select = -(cmb))
+    # For those with comorbidity
+    data2.cmb1 <- data2[data2$cmb == 1,]
+    data2.cmb1 <- subset(data2.cmb1, select = -(cmb))  
+    
+    # Separately for each strata of comorbidity, impute the partially observed variables  
+    # For those without comorbidity
+    # Impute
+    sia.imp.cmb0 <- mice(data2.cmb0, meth = c('','','','','','logreg'), 
+                         m=m, maxit = maxit, seed = i)  # Perform passive imputation    
+    # State the completion of the imputation for cmb0
+    print(paste0("Imputation for Cmb0 done"))
+    
+    # For those with comorbidity
+    #Impute
+    sia.imp.cmb1 <- mice(data2.cmb1, meth = c('','','','','','logreg'), 
+                         m=m, maxit = maxit, seed = i)  # Perform passive imputation    
+    # State the completion of the imputation for cmb1
+    print(paste0("Imputation for Cmb1 done"))
+    
+    # For each imputed data set, create the interaction variable based on stage*comorbidity
+    sia.imp.cmb0.data <- list()
+    sia.imp.cmb1.data <- list()
+    for (j in 1:m) {
+      # For those without comorbidity
+      sia.imp.cmb0.data[[j]] <- complete(sia.imp.cmb0, j)
+      
+      sia.imp.cmb0.data[[j]]$cmb <- 0
+      
+      sia.imp.cmb0.data[[j]]$stage.var <- as.numeric(sia.imp.cmb0.data[[j]]$stage.var)
+      
+      sia.imp.cmb0.data[[j]]$stage.var <- sia.imp.cmb0.data[[j]]$stage.var - 1
+      
+      sia.imp.cmb0.data[[j]]$IntStageCmb <- sia.imp.cmb0.data[[j]]$cmb * sia.imp.cmb0.data[[j]]$stage.var
+      
+      # For those with comorbidity
+      sia.imp.cmb1.data[[j]] <- complete(sia.imp.cmb1, j)
+      
+      sia.imp.cmb1.data[[j]]$cmb <- 1
+      
+      sia.imp.cmb1.data[[j]]$stage.var <- as.numeric(sia.imp.cmb1.data[[j]]$stage.var)
+      
+      sia.imp.cmb1.data[[j]]$stage.var <- sia.imp.cmb1.data[[j]]$stage.var - 1
+      
+      sia.imp.cmb1.data[[j]]$IntStageCmb <- sia.imp.cmb1.data[[j]]$cmb * sia.imp.cmb1.data[[j]]$stage.var
+    }
+    
+    # Append the imputed data sets for the two strata (giving K imputed data sets)
+    sia.sim.cmb.data.merge <- list()
+    for (j in 1:m) {
+      sia.sim.cmb.data.merge[[j]] <- rbind(sia.imp.cmb0.data[[j]], sia.imp.cmb1.data[[j]])
+    }
+    
+    # Obtain coefficients for each of the data sets
+    sia.imp.fit <- list()
+    for (j in 1:m) {  
+      invisible(capture.output(sia.imp.fit.j <- glm(death ~ treat + agediag + sex + dep + cmb + stage.var + IntStageCmb,
+                                                    data = sia.sim.cmb.data.merge[[j]], family = "binomial") #; summary(sia.imp.fit.i)
+      ))
+      sia.imp.fit[[j]] <- sia.imp.fit.j
+      print(paste0("Model ", j, " done"))
+    }    
+    
+    # Within each simulation, combine the estimates
+    print(paste0("Combining estimates"))
+    sia.sim.coef <- MIextract(sia.imp.fit, fun = coef);  sia.sim.coef
+    sia.sim.var  <- MIextract(sia.imp.fit, fun = function(x) diag(vcov(x)));  sia.sim.var
+    sia.sim.est  <- MIcombine(sia.sim.coef, sia.sim.var); sia.sim.est
+    
+    # Add the results to the estimates data set
+    estimates1 <- data.frame(Rep = i, 
+                             Cmb = sia.sim.est[["coefficients"]][["cmb"]],
+                             Stage = sia.sim.est[["coefficients"]][["stage.var"]],
+                             Int = sia.sim.est[["coefficients"]][["IntStageCmb"]],
+                             CmbSE = sia.sim.est[["variance"]][6,6],
+                             StageSE = sia.sim.est[["variance"]][7,7],
+                             IntSE = sia.sim.est[["variance"]][8,8],
+                             DGM = 4,
+                             Method = 'SIA'
+    )
+    estimates <- rbind(estimates, estimates1)
+    
+    # State the completion of this simulation
+    print(paste0('SIA imputation: ', 'simulation ', i, ' done'))
+    
+    
+  ####################################
+  # SMC-FCS
+  ####################################
+    
+    # Obtain the data
+    data2 <- data
+    
+    # Redefine the variables as factors
+    data2$stage.var  <- as.factor(data2[[paste0("stage.mcar.20.", i)]])      # Stage variable
+    
+    # Specify the variables to be used in the imputation
+    data.subset <- data2[,c('death','treat','agediag','sex','dep','cmb','stage.var')]
+    
+    # Perform imputation on the variables ("SMC-FCS")
+    smcfcs.imp <- smcfcs(data.subset, smtype = 'logistic', 
+                         smformula = 'death ~ treat + agediag + sex + dep + cmb + stage.var + cmb*stage.var',
+                         method = c('','','','','','','logreg'), m=m, numit=numit) 
+    
+    # Fit substantive model
+    smcfcslist <- imputationList(smcfcs.imp$impDatasets)
+    smcfcs.models <- with(smcfcslist, glm(death ~ treat + agediag + sex + dep + 
+                                            cmb + stage.var + cmb*stage.var, family = 'binomial'))  
+    smcfcs.sim.est <- MIcombine(smcfcs.models); smcfcs.sim.est
+    
+    # Add the results to the estimates data set
+    estimates1 <- data.frame(Rep = i, 
+                             Cmb = smcfcs.sim.est[["coefficients"]][["cmb"]],
+                             Stage = smcfcs.sim.est[["coefficients"]][["stage.var1"]],
+                             Int = smcfcs.sim.est[["coefficients"]][["cmb:stage.var1"]],
+                             CmbSE = smcfcs.sim.est[["variance"]][6,6],
+                             StageSE = smcfcs.sim.est[["variance"]][7,7],
+                             IntSE = smcfcs.sim.est[["variance"]][8,8],
+                             DGM = 4,
+                             Method = 'SMCFCS'
+    )
+    estimates <- rbind(estimates, estimates1)
+    
+    # State the completion of this simulation
+    print(paste0('SMCFCS imputation: ', 'simulation ', i, ' done'))
+    
+  }
+
+
+
+
+
+
+
+
+
+########################################################################################################################
+# Scenario 5: Continuous Z
+# MAR, continuous Z, N/A pZ, 20% missing X, OR = 1.3
+########################################################################################################################
+
+
+# Specify criteria for this scenario
+  beta.int <- 1.3   # Effect of interaction (i.e., OR = 1.3)
+  beta.ccmbef <- 0.9   # Prevalence of fully observed variable in interaction
+  z <- 20           # Proportion of missing data in stage variable
+
+  
+# Start the loop through the simulations...
+  for (i in n.sim) {
+    
+    # Set the seed
+    seed <- i
+    
+    # Generate the data
+    # Generate the data
+    data <- sim.dt(n = 100000, seed = i,
+                   treatef = 0.85, ageef = 1.3, sexef = 0.9, depef = 1.2, 
+                   ccmbef = beta.ccmbef, stageef = 1.4, IntStageCcmbef = beta.int)
+    print(paste0('Data for simulation ', i ,' generated'))
+    
+    # Generate some missing data
+    n <- length(data$agediag)
+    p.stage  <- c(z)
+    z.stage <- seq(-5.0, -0.0, 0.01)
+    
+    # Outcome-dependent missing at random for Stage
+    stage.omar <- function(n, betas) {
+      data$p.miss <- (exp(betas))/(1+exp(betas));     summary(data$p.miss)
+      data$i.miss <- rbinom(1:n,1, prob=data$p.miss);    prop.table(table(data$i.miss))
+      miss.prop <- (plyr::round_any(mean(data$i.miss), accuracy=0.01, f = round))*100; miss.prop
+      col_name <- paste0('stage.omar', '.', miss.prop, '.', i)
+      stage2 <- data.frame(ifelse(data$i.miss==1, NA, data$stage))
+      colnames(stage2) <- col_name
+      data <- cbind(data,stage2)
+      return(data)
+    }
+    
+    count <- 0
+    start_time <- Sys.time()
+    count <- count + 1
+    for (j in z.stage) {
+      betas <- j + 1.0*(data$treat) + 1.0*(data$agediag) + 1.0*(data$sex) + 
+        1.0*(data$dep) + 1.0*(data$ccmb) + 1.0*(data$death)
+      data$p.miss <- (exp(betas))/(1+exp(betas));     summary(data$p.miss)
+      data$i.miss <- rbinom(1:n,1, prob=data$p.miss);    prop.table(table(data$i.miss))
+      miss.prop <- (plyr::round_any(mean(data$i.miss), accuracy=0.01, f = round))*100; miss.prop
+      for (k in p.stage) {
+        if (miss.prop==(k) ) {  
+          data <- stage.omar(n, betas)
         }
-        
-        # Obtain coefficients for each of the data sets
-        jav.imp.fit <- list()
-        for (j in 1:m) {  
-          invisible(capture.output(jav.imp.fit.j <- glm(death ~ treat + agediag + sex + dep + cmb + stage.var + IntStageCmb,
-                                                        data = jav.imp.data[[j]], family = "binomial")
-          ))
-          jav.imp.fit[[j]] <- jav.imp.fit.j
-          print(paste0("Model ", j, " done"))
-        }
-        
-        # Within this simulation, combine the estimates
-        jav.sim.coef <- MIextract(jav.imp.fit, fun = coef);  jav.sim.coef
-        jav.sim.var  <- MIextract(jav.imp.fit, fun = function(x) diag(vcov(x)));  jav.sim.var
-        jav.sim.est  <- MIcombine(jav.sim.coef, jav.sim.var)
-        
-        # Save the coefficients from each of the simulations
-        jav.all.coef[[y]][i,] <- jav.sim.est$coefficients
-        
-        # State the completion of the simulation
-        print(paste0('Stage prevalence ', y, '%: ', 'JAV imputation: ', 'simulation ', count, ' done'))
       }
-      
-      # Average of the coefficients across the simulations
-      {
-      jav.mean.coef[[y]] <-  data.frame(matrix(nrow=1,ncol=8))
-      jav.mean.coef[[y]][1] <- mean(jav.all.coef[[y]]$X1)
-      jav.mean.coef[[y]][2] <- mean(jav.all.coef[[y]]$X2)
-      jav.mean.coef[[y]][3] <- mean(jav.all.coef[[y]]$X3)
-      jav.mean.coef[[y]][4] <- mean(jav.all.coef[[y]]$X4)
-      jav.mean.coef[[y]][5] <- mean(jav.all.coef[[y]]$X5)
-      jav.mean.coef[[y]][6] <- mean(jav.all.coef[[y]]$X6)
-      jav.mean.coef[[y]][7] <- mean(jav.all.coef[[y]]$X7)
-      jav.mean.coef[[y]][8] <- mean(jav.all.coef[[y]]$X8)
-      colnames(jav.mean.coef[[y]]) <- c('Intercept','Treat','Agediag','Sex','Dep','Cmb','Stage','Int')
-      #exp(jav.mean.coef[[y]])
-      }
-      # Summarise the results so far
-      #exp(model1$coefficients); exp(model2$coefficients); exp(pass.mean.coef); exp(jav.mean.coef)
+      data <- data[, !duplicated(colnames(data))]
+    }
+    print(paste0('Missing data for simulation ', i , ' generated'))
+    end_time <- Sys.time()
+    end_time - start_time
+    
+    # Duplicate the data
+    data2 <- data  
+    print(paste0('Data duplicated'))
+    
+    # Redefine the variables as factors
+    data2$stage.var  <- as.factor(data2[[paste0("stage.omar.20.", i)]])      # Stage variable
+    
+    
+  ########################
+  # Complete case analysis
+  ########################
+    
+    # Check the results of the partially observed data
+    CCAmodel.1   <- glm( death ~ treat + agediag + sex + dep + ccmb + stage.var + IntStageCmb,
+                         data = data2, family = "binomial"); summary(CCAmodel.1); exp(CCAmodel.1$coefficients[-1])
+    
+    CCAmodel.1a <- glm( death ~ treat + agediag + sex + dep + ccmb + stage.var + ccmb*stage.var,
+                        data = data2, family = "binomial"); summary(CCAmodel.1a); exp(CCAmodel.1a$coefficients[-1])
+    print(paste0('Complete case analysis model done'))
+    
+    
+  ####################
+  # Passive imputation
+  ####################
+    
+    # Specify the variables to be used in the imputation
+    data2 <- data2[,c('death','treat','agediag','sex','dep','ccmb','stage.var')]
+    
+    # Perform passive imputation
+    pass.imp <- mice(data2, meth = c('','','','','','','logreg'), m=m, maxit = maxit, seed = i)  # Perform passive imputation
+    
+    # For each imputed data set, create the interaction variable based on stage*comorbidity
+    pass.imp.data <- list()
+    for (j in 1:m) {
+      pass.imp.data[[j]] <- complete(pass.imp, j)
+      pass.imp.data[[j]]$stage.var <- as.numeric(pass.imp.data[[j]]$stage.var)
+      pass.imp.data[[j]]$stage.var <- pass.imp.data[[j]]$stage.var - 1
+      pass.imp.data[[j]]$IntStageCcmb <- pass.imp.data[[j]]$ccmb * as.numeric(pass.imp.data[[j]]$stage.var)
+    }
+    
+    # For this simulation, obtain the coefficients for each of the imputed data sets
+    pass.imp.fit <- list()
+    for (j in 1:m) {  
+      invisible(capture.output(pass.imp.fit.j <- glm(death ~ treat + agediag + sex + dep + ccmb + stage.var + IntStageCcmb,
+                                                     data = pass.imp.data[[j]], family = "binomial") 
+      ))
+      pass.imp.fit[[j]] <- pass.imp.fit.j
+      print(paste0("Model ", j, " done"))
+    }  
+    
+    # Within this simulation, combine the estimates
+    pass.sim.coef <- MIextract(pass.imp.fit, fun = coef);  pass.sim.coef
+    pass.sim.var  <- MIextract(pass.imp.fit, fun = function(x) diag(vcov(x)));  pass.sim.var
+    pass.sim.est <- MIcombine(pass.sim.coef, pass.sim.var); pass.sim.est
+    
+    # Add the results to the estimates data set
+    estimates1 <- data.frame(Rep = i, 
+                             Cmb = pass.sim.est[["coefficients"]][["ccmb"]],
+                             Stage = pass.sim.est[["coefficients"]][["stage.var"]],
+                             Int = pass.sim.est[["coefficients"]][["IntStageCcmb"]],
+                             CmbSE = pass.sim.est[["variance"]][6,6],
+                             StageSE = pass.sim.est[["variance"]][7,7],
+                             IntSE = pass.sim.est[["variance"]][8,8],
+                             DGM = 5,
+                             Method = 'Passive'
+    )
+    estimates <- rbind(estimates, estimates1)
+    
+    # State the completion of the simulation
+    print(paste0('Passive imputation: ', 'simulation ', i, ' done'))
+    
+    
 
     
-    ########################
-    # Stratify-impute-append
-    ########################
+
     
-      # Define the initial values for the loop
-      count <- 0 # count number of simulations
+  #######################  
+  # Just another variable
+  #######################
+    
+    # Obtain the data
+    data2 <- data
+    
+    # Rename the variables of interest
+    data2$stage.var  <- data2[[paste0("stage.omar.20.", i)]]      # Stage variable
+    
+    # Recode the interaction variable (because it must be missing when stage is missing)
+    data2$IntStageCcmb <- data2$ccmb * data2$stage.var
+    
+    # Convert to factor variables
+    data2$stage.var <- as.factor(data2$stage.var)
+    data2$IntStageCcmb <- as.numeric(data2$IntStageCcmb) 
+    
+    # Specify the variables to be used in the imputation
+    data2 <- data2[,c('death','treat','agediag','sex','dep','ccmb','stage.var','IntStageCcmb')]
+    
+    # Perform passive imputation
+    jav.imp <- mice(data2, meth = c('','','','','','','logreg','norm'), m=m, maxit = maxit, seed = i)  # Perform passive imputation
+    
+    # Extract the imputed data sets
+    jav.imp.data <- list()
+    for (j in 1:m) {
+      jav.imp.data[[j]] <- complete(jav.imp,j)
       
-      # Create a data frame to store the results for each simulation
-      sia.all.coef[[y]] <- data.frame(matrix(nrow=1,ncol=8))
+      jav.imp.data[[j]]$stage.var   <- as.numeric(jav.imp.data[[j]]$stage.var)
+      jav.imp.data[[j]]$IntStageCcmb <- as.numeric(jav.imp.data[[j]]$IntStageCcmb)
       
-      # Loop through the simulations  
-      for (i in n.sim) {
-        # Set the counter
-        count <- count + 1
-        
-        # Obtain the data
-        data2 <- data
-        
-        # Redefine the variables as factors
-        data2$stage.var  <- as.factor(data2[[paste0("stage.omar.40.", i)]])      # Stage variable
-        
-        # Specify the variables to be used in the imputation
-        data2 <- data2[,c('death','treat','agediag','sex','dep','cmb','stage.var')]
-        
-        # Stratify the data by levels of comorbidity
-        # For those without comorbidity
-        data2.cmb0 <- data2[data2$cmb == 0,]
-        data2.cmb0 <- subset(data2.cmb0, select = -(cmb))
-        # For those with comorbidity
-        data2.cmb1 <- data2[data2$cmb == 1,]
-        data2.cmb1 <- subset(data2.cmb1, select = -(cmb))  
-        
-        # Separately for each strata of comorbidity, impute the partially observed variables  
-        # For those without comorbidity
+      jav.imp.data[[j]]$stage.var   <- jav.imp.data[[j]]$stage.var - 1
+    }
+    
+    # Obtain coefficients for each of the data sets
+    jav.imp.fit <- list()
+    for (j in 1:m) {  
+      invisible(capture.output(jav.imp.fit.j <- glm(death ~ treat + agediag + sex + dep + ccmb + stage.var + IntStageCcmb,
+                                                    data = jav.imp.data[[j]], family = "binomial")
+      ))
+      jav.imp.fit[[j]] <- jav.imp.fit.j
+      print(paste0("Model ", j, " done"))
+    }
+    
+    # Within this simulation, combine the estimates
+    jav.sim.coef <- MIextract(jav.imp.fit, fun = coef);  jav.sim.coef
+    jav.sim.var  <- MIextract(jav.imp.fit, fun = function(x) diag(vcov(x)));  jav.sim.var
+    jav.sim.est  <- MIcombine(jav.sim.coef, jav.sim.var); jav.sim.est
+    
+    # Add the results to the estimates data set
+    estimates1 <- data.frame(Rep = i, 
+                             Cmb = jav.sim.est[["coefficients"]][["ccmb"]],
+                             Stage = jav.sim.est[["coefficients"]][["stage.var"]],
+                             Int = jav.sim.est[["coefficients"]][["IntStageCcmb"]],
+                             CmbSE = jav.sim.est[["variance"]][6,6],
+                             StageSE = jav.sim.est[["variance"]][7,7],
+                             IntSE = jav.sim.est[["variance"]][8,8],
+                             DGM = 5,
+                             Method = 'JAV'
+    )
+    estimates <- rbind(estimates, estimates1)
+    
+    # State the completion of the simulation
+    print(paste0('JAV imputation: ', 'simulation ', i, ' done'))
+    
+    
+  ########################
+  # Stratify-impute-append
+  ########################
+    
+    # Obtain the data
+    data2 <- data
+    
+    # Categorise the continuous variable (i.e., comorbidity)
+    data2$ccmbcat <- gtools::quantcut(data2$ccmb, 5, labels = FALSE)
+    
+    # Redefine the variables as factors
+    data2$stage.var  <- as.factor(data2[[paste0("stage.omar.20.", i)]])      # Stage variable
+    
+    # Specify the variables to be used in the imputation
+    data2 <- data2[,c('death','treat','agediag','sex','dep','ccmbcat','stage.var')]
+    
+    # Stratify the data by levels of comorbidity
+      # Comorbidity = 1
+      data2.cmb1 <- data2[data2$ccmbcat == 1,]
+      data2.cmb1 <- subset(data2.cmb1, select = -(ccmbcat))
+      # Comorbidity = 2
+      data2.cmb2 <- data2[data2$ccmbcat == 2,]
+      data2.cmb2 <- subset(data2.cmb2, select = -(ccmbcat))  
+      # Comorbidity = 3
+      data2.cmb3 <- data2[data2$ccmbcat == 3,]
+      data2.cmb3 <- subset(data2.cmb3, select = -(ccmbcat))  
+      # Comorbidity = 4
+      data2.cmb4 <- data2[data2$ccmbcat == 4,]
+      data2.cmb4 <- subset(data2.cmb4, select = -(ccmbcat))  
+      # Comorbidity = 5
+      data2.cmb5 <- data2[data2$ccmbcat == 5,]
+      data2.cmb5 <- subset(data2.cmb5, select = -(ccmbcat))  
+    
+    
+    # Separately for each strata of comorbidity, impute the partially observed variables  
+      # Comorbidity = 1
         # Impute
-        sia.imp.cmb0 <- mice(data2.cmb0, meth = c('','','','','','logreg'), 
-                             m=m, maxit = maxit, seed = 1234)  # Perform passive imputation    
-        # State the completion of the imputation for cmb0
-        print(paste0("Imputation for Cmb0 done"))
-        
-        # For those without comorbidity
-        #Impute
         sia.imp.cmb1 <- mice(data2.cmb1, meth = c('','','','','','logreg'), 
-                             m=m, maxit = maxit, seed = 1234)  # Perform passive imputation    
-        # State the completion of the imputation for cmb1
+                             m=m, maxit = maxit, seed = i)  # Perform passive imputation    
+        # State the completion of the imputation for cmb0
         print(paste0("Imputation for Cmb1 done"))
+      
+      # Comorbidity = 2
+        #Impute
+        sia.imp.cmb2 <- mice(data2.cmb2, meth = c('','','','','','logreg'), 
+                             m=m, maxit = maxit, seed = i)  # Perform passive imputation    
+        # State the completion of the imputation for cmb1
+        print(paste0("Imputation for Cmb2 done"))
         
-        # For each imputed data set, create the interaction variable based on stage*comorbidity
-        sia.imp.cmb0.data <- list()
-        sia.imp.cmb1.data <- list()
-        for (j in 1:m) {
-          # For those without comorbidity
-          sia.imp.cmb0.data[[j]] <- complete(sia.imp.cmb0, j)
-          
-          sia.imp.cmb0.data[[j]]$cmb <- 0
-          
-          sia.imp.cmb0.data[[j]]$stage.var <- as.numeric(sia.imp.cmb0.data[[j]]$stage.var)
-          
-          sia.imp.cmb0.data[[j]]$stage.var <- sia.imp.cmb0.data[[j]]$stage.var - 1
-          
-          sia.imp.cmb0.data[[j]]$IntStageCmb <- sia.imp.cmb0.data[[j]]$cmb * sia.imp.cmb0.data[[j]]$stage.var
-          
-          # For those with comorbidity
-          sia.imp.cmb1.data[[j]] <- complete(sia.imp.cmb1, j)
-          
-          sia.imp.cmb1.data[[j]]$cmb <- 1
-          
-          sia.imp.cmb1.data[[j]]$stage.var <- as.numeric(sia.imp.cmb1.data[[j]]$stage.var)
-          
-          sia.imp.cmb1.data[[j]]$stage.var <- sia.imp.cmb1.data[[j]]$stage.var - 1
-          
-          sia.imp.cmb1.data[[j]]$IntStageCmb <- sia.imp.cmb1.data[[j]]$cmb * sia.imp.cmb1.data[[j]]$stage.var
+      # Comorbidity = 3
+        #Impute
+        sia.imp.cmb3 <- mice(data2.cmb3, meth = c('','','','','','logreg'), 
+                             m=m, maxit = maxit, seed = i)  # Perform passive imputation    
+        # State the completion of the imputation for cmb1
+        print(paste0("Imputation for Cmb3 done"))      
+      
+      # Comorbidity = 4
+        #Impute
+        sia.imp.cmb4 <- mice(data2.cmb4, meth = c('','','','','','logreg'), 
+                             m=m, maxit = maxit, seed = i)  # Perform passive imputation    
+        # State the completion of the imputation for cmb1
+        print(paste0("Imputation for Cmb4 done"))
+      
+      # Comorbidity = 5
+        #Impute
+        sia.imp.cmb5 <- mice(data2.cmb5, meth = c('','','','','','logreg'), 
+                             m=m, maxit = maxit, seed = i)  # Perform passive imputation    
+        # State the completion of the imputation for cmb1
+        print(paste0("Imputation for Cmb5 done"))
+    
+    
+    # For each imputed data set, create the interaction variable based on stage*comorbidity
+      sia.imp.cmb1.data <- list()
+      sia.imp.cmb2.data <- list()
+      sia.imp.cmb3.data <- list()
+      sia.imp.cmb4.data <- list()
+      sia.imp.cmb5.data <- list()
+    
+      for (j in 1:m) {
+        # Comorbidity = 1
+        sia.imp.cmb1.data[[j]] <- complete(sia.imp.cmb1, j)
+        sia.imp.cmb1.data[[j]]$ccmbcat <- 1
+        sia.imp.cmb1.data[[j]]$stage.var <- as.numeric(sia.imp.cmb1.data[[j]]$stage.var)
+        sia.imp.cmb1.data[[j]]$stage.var <- sia.imp.cmb1.data[[j]]$stage.var - 1
+        sia.imp.cmb1.data[[j]]$IntStageCmb <- sia.imp.cmb1.data[[j]]$ccmbcat * sia.imp.cmb1.data[[j]]$stage.var
+        
+        # Comorbidity = 2
+        sia.imp.cmb2.data[[j]] <- complete(sia.imp.cmb2, j)
+        sia.imp.cmb2.data[[j]]$ccmbcat <- 2
+        sia.imp.cmb2.data[[j]]$stage.var <- as.numeric(sia.imp.cmb2.data[[j]]$stage.var)
+        sia.imp.cmb2.data[[j]]$stage.var <- sia.imp.cmb2.data[[j]]$stage.var - 1
+        sia.imp.cmb2.data[[j]]$IntStageCmb <- sia.imp.cmb2.data[[j]]$ccmbcat * sia.imp.cmb2.data[[j]]$stage.var
+        
+        # Comorbidity = 3
+        sia.imp.cmb3.data[[j]] <- complete(sia.imp.cmb3, j)
+        sia.imp.cmb3.data[[j]]$ccmbcat <- 3
+        sia.imp.cmb3.data[[j]]$stage.var <- as.numeric(sia.imp.cmb3.data[[j]]$stage.var)
+        sia.imp.cmb3.data[[j]]$stage.var <- sia.imp.cmb3.data[[j]]$stage.var - 1
+        sia.imp.cmb3.data[[j]]$IntStageCmb <- sia.imp.cmb3.data[[j]]$ccmbcat * sia.imp.cmb3.data[[j]]$stage.var
+        
+        # Comorbidity = 4
+        sia.imp.cmb4.data[[j]] <- complete(sia.imp.cmb4, j)
+        sia.imp.cmb4.data[[j]]$ccmbcat <- 4
+        sia.imp.cmb4.data[[j]]$stage.var <- as.numeric(sia.imp.cmb4.data[[j]]$stage.var)
+        sia.imp.cmb4.data[[j]]$stage.var <- sia.imp.cmb4.data[[j]]$stage.var - 1
+        sia.imp.cmb4.data[[j]]$IntStageCmb <- sia.imp.cmb4.data[[j]]$ccmbcat * sia.imp.cmb4.data[[j]]$stage.var
+        
+        # Comorbidity = 5
+        sia.imp.cmb5.data[[j]] <- complete(sia.imp.cmb5, j)
+        sia.imp.cmb5.data[[j]]$ccmbcat <- 5
+        sia.imp.cmb5.data[[j]]$stage.var <- as.numeric(sia.imp.cmb5.data[[j]]$stage.var)
+        sia.imp.cmb5.data[[j]]$stage.var <- sia.imp.cmb5.data[[j]]$stage.var - 1
+        sia.imp.cmb5.data[[j]]$IntStageCmb <- sia.imp.cmb5.data[[j]]$ccmbcat * sia.imp.cmb5.data[[j]]$stage.var
+        
+      }
+    
+    # Append the imputed data sets for the two strata (giving K imputed data sets)
+      sia.sim.cmb.data.merge <- list()
+      for (j in 1:m) {
+        sia.sim.cmb.data.merge[[j]] <- rbind(sia.imp.cmb1.data[[j]], 
+                                             sia.imp.cmb2.data[[j]],
+                                             sia.imp.cmb3.data[[j]],
+                                             sia.imp.cmb4.data[[j]],
+                                             sia.imp.cmb5.data[[j]])
+      }
+    
+    # Obtain coefficients for each of the data sets
+      sia.imp.fit <- list()
+      for (j in 1:m) {  
+        invisible(capture.output(sia.imp.fit.j <- glm(death ~ treat + agediag + sex + dep + ccmbcat + stage.var + IntStageCmb,
+                                                      data = sia.sim.cmb.data.merge[[j]], family = "binomial") #; summary(sia.imp.fit.i)
+        ))
+        sia.imp.fit[[j]] <- sia.imp.fit.j
+        print(paste0("Model ", j, " done"))
+      }    
+    
+    # Within each simulation, combine the estimates
+      print(paste0("Combining estimates"))
+      sia.sim.coef <- MIextract(sia.imp.fit, fun = coef);  sia.sim.coef
+      sia.sim.var  <- MIextract(sia.imp.fit, fun = function(x) diag(vcov(x)));  sia.sim.var
+      sia.sim.est  <- MIcombine(sia.sim.coef, sia.sim.var)
+    
+    # Add the results to the estimates data set
+      estimates1 <- data.frame(Rep = i, 
+                               Cmb = sia.sim.est[["coefficients"]][["ccmbcat"]],
+                               Stage = sia.sim.est[["coefficients"]][["stage.var"]],
+                               Int = sia.sim.est[["coefficients"]][["IntStageCmb"]],
+                               CmbSE = sia.sim.est[["variance"]][6,6],
+                               StageSE = sia.sim.est[["variance"]][7,7],
+                               IntSE = sia.sim.est[["variance"]][8,8],
+                               DGM = 5,
+                               Method = 'SIA'
+      )
+      estimates <- rbind(estimates, estimates1)
+      
+    # State the completion of this simulation
+      print(paste0('SIA imputation: ', 'simulation ', i, ' done'))
+    
+    
+      
+  ####################################
+  # SMC-FCS
+  ####################################
+    
+    # Obtain the data
+    data2 <- data
+    
+    # Redefine the variables as factors
+    data2$stage.var  <- as.factor(data2[[paste0("stage.omar.20.", i)]])      # Stage variable
+    
+    # Specify the variables to be used in the imputation
+    data.subset <- data2[,c('death','treat','agediag','sex','dep','ccmb','stage.var')]
+    
+    # Perform imputation on the variables ("SMC-FCS")
+    smcfcs.imp <- smcfcs(data.subset, smtype = 'logistic', 
+                         smformula = 'death ~ treat + agediag + sex + dep + ccmb + stage.var + ccmb*stage.var',
+                         method = c('','','','','','','logreg'), m=m, numit=numit) 
+    
+    # Fit substantive model
+    smcfcslist <- imputationList(smcfcs.imp$impDatasets)
+    smcfcs.models <- with(smcfcslist, glm(death ~ treat + agediag + sex + dep + 
+                                            ccmb + stage.var + ccmb*stage.var, family = 'binomial'))  
+    smcfcs.sim.est <- MIcombine(smcfcs.models); smcfcs.sim.est
+    
+    # Add the results to the estimates data set
+    estimates1 <- data.frame(Rep = i, 
+                             Cmb = smcfcs.sim.est[["coefficients"]][["ccmb"]],
+                             Stage = smcfcs.sim.est[["coefficients"]][["stage.var1"]],
+                             Int = smcfcs.sim.est[["coefficients"]][["ccmb:stage.var1"]],
+                             CmbSE = smcfcs.sim.est[["variance"]][6,6],
+                             StageSE = smcfcs.sim.est[["variance"]][7,7],
+                             IntSE = smcfcs.sim.est[["variance"]][8,8],
+                             DGM = 5,
+                             Method = 'SMCFCS'
+    )
+    estimates <- rbind(estimates, estimates1)
+    
+    # State the completion of this simulation
+    print(paste0('SMCFCS imputation: ', 'simulation ', i, ' done'))
+    
+  }
+
+  
+
+
+########################################################################################################################
+# Scenario 6: Low prevalence of Z
+# MAR, binary Z, 1% pZ, 20% missing X, OR = 1.3
+########################################################################################################################
+
+
+# Specify criteria for this scenario
+  beta.int <- 1.3   # Effect of interaction (i.e., OR = 1.3)
+  prob.cmb <- 0.01   # Prevalence of fully observed variable in interaction
+  z <- 20           # Proportion of missing data in stage variable
+
+
+# Start the loop through the simulations...
+  for (i in n.sim) {
+    
+    # Set the seed
+    seed <- i
+    
+    # Generate the data
+    data <- sim.dt(n = 100000, seed = i, probcmb = prob.cmb,
+                   treatef = 0.85, ageef = 1.3, sexef = 0.9, depef = 1.2, 
+                   cmbef = 0.9, stageef = 1.4, IntStageCmbef = beta.int)
+    print(paste0('Data for simulation ', i ,' generated'))
+    
+    # Generate some missing data
+    n <- length(data$agediag)
+    p.stage  <- c(z)
+    z.stage <- seq(-5.0, -0.0, 0.01)
+    
+    # Outcome-dependent missing at random for Stage
+    stage.omar <- function(n, betas) {
+      data$p.miss <- (exp(betas))/(1+exp(betas));     summary(data$p.miss)
+      data$i.miss <- rbinom(1:n,1, prob=data$p.miss);    prop.table(table(data$i.miss))
+      miss.prop <- (plyr::round_any(mean(data$i.miss), accuracy=0.01, f = round))*100; miss.prop
+      col_name <- paste0('stage.omar', '.', miss.prop, '.', i)
+      stage2 <- data.frame(ifelse(data$i.miss==1, NA, data$stage))
+      colnames(stage2) <- col_name
+      data <- cbind(data,stage2)
+      return(data)
+    }
+    
+    count <- 0
+    start_time <- Sys.time()
+    count <- count + 1
+    for (j in z.stage) {
+      betas <- j + 1.0*(data$treat) + 1.0*(data$agediag) + 1.0*(data$sex) + 
+        1.0*(data$dep) + 1.0*(data$cmb) + 1.0*(data$death)
+      data$p.miss <- (exp(betas))/(1+exp(betas));     summary(data$p.miss)
+      data$i.miss <- rbinom(1:n,1, prob=data$p.miss);    prop.table(table(data$i.miss))
+      miss.prop <- (plyr::round_any(mean(data$i.miss), accuracy=0.01, f = round))*100; miss.prop
+      for (k in p.stage) {
+        if (miss.prop==(k) ) {  
+          data <- stage.omar(n, betas)
         }
-        
-        # Append the imputed data sets for the two strata (giving K imputed data sets)
-        sia.sim.cmb.data.merge <- list()
-        for (j in 1:m) {
-          sia.sim.cmb.data.merge[[j]] <- rbind(sia.imp.cmb0.data[[j]], sia.imp.cmb1.data[[j]])
-        }
-        
-        # Obtain coefficients for each of the data sets
-        sia.imp.fit <- list()
-        for (j in 1:m) {  
-          invisible(capture.output(sia.imp.fit.j <- glm(death ~ treat + agediag + sex + dep + cmb + stage.var + IntStageCmb,
-                                                        data = sia.sim.cmb.data.merge[[j]], family = "binomial") #; summary(sia.imp.fit.i)
-          ))
-          sia.imp.fit[[j]] <- sia.imp.fit.j
-          print(paste0("Model ", j, " done"))
-        }    
-        
-        # Within each simulation, combine the estimates
-        print(paste0("Combining estimates"))
-        sia.sim.coef <- MIextract(sia.imp.fit, fun = coef);  sia.sim.coef
-        sia.sim.var  <- MIextract(sia.imp.fit, fun = function(x) diag(vcov(x)));  sia.sim.var
-        sia.sim.est  <- MIcombine(sia.sim.coef, sia.sim.var)
-        
-        # Save the coefficients from each of the simulations
-        print(paste0("Saving coefficients"))
-        sia.all.coef[[y]][i,] <- sia.sim.est$coefficients
-        
-        # State the completion of this simulation
-        print(paste0('Stage prevalence ', y, '%: ', 'passive imputation: ', 'simulation ', count, ' done'))
       }
-      
-      # Average of the coefficients across the simulations
-      {
-      sia.mean.coef[[y]] <-  data.frame(matrix(nrow=1,ncol=8))
-      sia.mean.coef[[y]][1] <- mean(sia.all.coef[[y]]$X1)
-      sia.mean.coef[[y]][2] <- mean(sia.all.coef[[y]]$X2)
-      sia.mean.coef[[y]][3] <- mean(sia.all.coef[[y]]$X3)
-      sia.mean.coef[[y]][4] <- mean(sia.all.coef[[y]]$X4)
-      sia.mean.coef[[y]][5] <- mean(sia.all.coef[[y]]$X5)
-      sia.mean.coef[[y]][6] <- mean(sia.all.coef[[y]]$X6)
-      sia.mean.coef[[y]][7] <- mean(sia.all.coef[[y]]$X7)
-      sia.mean.coef[[y]][8] <- mean(sia.all.coef[[y]]$X8)
-      colnames(sia.mean.coef[[y]]) <- c('Intercept','Treat','Agediag','Sex','Dep','Cmb','Stage','Int')
-      #exp(sia.mean.coef[[y]])
-      }
-      
-      # Summary of the results so far
-      #exp(model1$coefficients); exp(model2$coefficients); exp(pass.mean.coef); exp(jav.mean.coef); exp(sia.mean.coef)
+      data <- data[, !duplicated(colnames(data))]
+    }
+    print(paste0('Missing data for simulation ', i , ' generated'))
+    end_time <- Sys.time()
+    end_time - start_time
+    
+    # Duplicate the data
+    data2 <- data  
+    print(paste0('Data duplicated'))
+    
+    # Redefine the variables as factors
+    data2$stage.var  <- as.factor(data2[[paste0("stage.omar.20.", i)]])      # Stage variable
     
     
-    ####################################
-    # SMC-FCS
-    ####################################
+  ########################
+  # Complete case analysis
+  ########################
     
-      # Install necessary pacakges
-      #install.packages('smcfcs')
-      library(smcfcs)
+    # Check the results of the partially observed data
+    CCAmodel.1   <- glm( death ~ treat + agediag + sex + dep + cmb + stage.var + IntStageCmb,
+                         data = data2, family = "binomial"); summary(CCAmodel.1); exp(CCAmodel.1$coefficients[-1])
+    
+    CCAmodel.1a <- glm( death ~ treat + agediag + sex + dep + cmb + stage.var + cmb*stage.var,
+                        data = data2, family = "binomial"); summary(CCAmodel.1a); exp(CCAmodel.1a$coefficients[-1])
+    print(paste0('Complete case analysis model done'))
+    
+    
+  ####################
+  # Passive imputation
+  ####################
+    
+    # Specify the variables to be used in the imputation
+    data2 <- data2[,c('death','treat','agediag','sex','dep','cmb','stage.var')]
+    
+    # Perform passive imputation
+    pass.imp <- mice(data2, meth = c('','','','','','','logreg'), m=m, maxit = maxit, seed = i)  # Perform passive imputation
+    
+    # For each imputed data set, create the interaction variable based on stage*comorbidity
+    pass.imp.data <- list()
+    for (j in 1:m) {
+      pass.imp.data[[j]] <- complete(pass.imp, j)
+      pass.imp.data[[j]]$stage.var <- as.numeric(pass.imp.data[[j]]$stage.var)
+      pass.imp.data[[j]]$stage.var <- pass.imp.data[[j]]$stage.var - 1
+      pass.imp.data[[j]]$IntStageCmb <- pass.imp.data[[j]]$cmb * as.numeric(pass.imp.data[[j]]$stage.var)
+    }
+    
+    # For this simulation, obtain the coefficients for each of the imputed data sets
+    pass.imp.fit <- list()
+    for (j in 1:m) {  
+      invisible(capture.output(pass.imp.fit.j <- glm(death ~ treat + agediag + sex + dep + cmb + stage.var + IntStageCmb,
+                                                     data = pass.imp.data[[j]], family = "binomial") 
+      ))
+      pass.imp.fit[[j]] <- pass.imp.fit.j
+      print(paste0("Model ", j, " done"))
+    }  
+    
+    # Within this simulation, combine the estimates
+    pass.sim.coef <- MIextract(pass.imp.fit, fun = coef);  pass.sim.coef
+    pass.sim.var  <- MIextract(pass.imp.fit, fun = function(x) diag(vcov(x)));  pass.sim.var
+    pass.sim.est <- MIcombine(pass.sim.coef, pass.sim.var); pass.sim.est
+    
+    # Add the results to the estimates data set
+    estimates1 <- data.frame(Rep = i, 
+                             Cmb = pass.sim.est[["coefficients"]][["cmb"]],
+                             Stage = pass.sim.est[["coefficients"]][["stage.var"]],
+                             Int = pass.sim.est[["coefficients"]][["IntStageCmb"]],
+                             CmbSE = pass.sim.est[["variance"]][6,6],
+                             StageSE = pass.sim.est[["variance"]][7,7],
+                             IntSE = pass.sim.est[["variance"]][8,8],
+                             DGM = 6,
+                             Method = 'Passive'
+    )
+    estimates <- rbind(estimates, estimates1)
+    
+    # State the completion of the simulation
+    print(paste0('Passive imputation: ', 'simulation ', i, ' done'))
+    
+    
+    
+  #######################  
+  # Just another variable
+  #######################
+    
+    # Obtain the data
+    data2 <- data
+    
+    # Rename the variables of interest
+    data2$stage.var  <- data2[[paste0("stage.omar.20.", i)]]      # Stage variable
+    
+    # Recode the interaction variable (because it must be missing when stage is missing)
+    data2$IntStageCmb <- data2$cmb * data2$stage.var
+    
+    # Convert to factor variables
+    data2$stage.var <- as.factor(data2$stage.var)
+    data2$IntStageCmb <- as.factor(data2$IntStageCmb) 
+    
+    # Specify the variables to be used in the imputation
+    data2 <- data2[,c('death','treat','agediag','sex','dep','cmb','stage.var','IntStageCmb')]
+    
+    # Perform passive imputation
+    jav.imp <- mice(data2, meth = c('','','','','','','logreg','logreg'), m=m, maxit = maxit, seed = i)  # Perform passive imputation
+    
+    # Extract the imputed data sets
+    jav.imp.data <- list()
+    for (j in 1:m) {
+      jav.imp.data[[j]] <- complete(jav.imp,j)
       
-      # Define the initial value for the count
-      count <- 0
+      jav.imp.data[[j]]$stage.var   <- as.numeric(jav.imp.data[[j]]$stage.var)
+      jav.imp.data[[j]]$IntStageCmb <- as.numeric(jav.imp.data[[j]]$IntStageCmb)
       
-      # Create a data frame to store the results for each simulation
-      smcfcs.all.coef[[y]] <- data.frame(matrix(nrow=1,ncol=8))
+      jav.imp.data[[j]]$stage.var   <- jav.imp.data[[j]]$stage.var - 1
+      jav.imp.data[[j]]$IntStageCmb <- jav.imp.data[[j]]$IntStageCmb - 1
       
-      # Loop through the simulations
-      for (i in n.sim) {
-        # Set the counter
-        count <- count + 1
-        
-        # Obtain the data
-        data2 <- data
-        
-        # Redefine the variables as factors
-        data2$stage.var  <- as.factor(data2[[paste0("stage.omar.40.", i)]])      # Stage variable
-        
-        # Specify the variables to be used in the imputation
-        data.subset <- data2[,c('death','treat','agediag','sex','dep','cmb','stage.var')]
-        
-        # Perform imputation on the variables ("SMC-FCS")
-        smcfcs.imp <- smcfcs(data.subset, smtype = 'logistic', 
-                             smformula = 'death ~ treat + agediag + sex + dep + cmb + stage.var + cmb*stage.var',
-                             method = c('','','','','','','logreg'), m=m, numit=numit) 
-        
-        # Fit substantive model
-        smcfcslist <- imputationList(smcfcs.imp$impDatasets)
-        smcfcs.models <- with(smcfcslist, glm(death ~ treat + agediag + sex + dep + 
-                                                cmb + stage.var + cmb*stage.var, family = 'binomial'))  
-        smcfcs.sim.est <- MIcombine(smcfcs.models)
-        
-        # Save the coefficients from each of the simulations
-        smcfcs.all.coef[[y]][i,] <- smcfcs.sim.est$coefficients
-        
-        # State the completion of the simulation
-        print(paste0('Stage prevalence ', y, '%: ', 'SMC-FCS imputation: ', 'simulation ', count, ' done'))
-      }
+      #print(head(jav.imp.data[[j]][is.na(data$stage.var), ], 10))
+    }
+    
+    # Obtain coefficients for each of the data sets
+    jav.imp.fit <- list()
+    for (j in 1:m) {  
+      invisible(capture.output(jav.imp.fit.j <- glm(death ~ treat + agediag + sex + dep + cmb + stage.var + IntStageCmb,
+                                                    data = jav.imp.data[[j]], family = "binomial")
+      ))
+      jav.imp.fit[[j]] <- jav.imp.fit.j
+      print(paste0("Model ", j, " done"))
+    }
+    
+    # Within this simulation, combine the estimates
+    jav.sim.coef <- MIextract(jav.imp.fit, fun = coef);  jav.sim.coef
+    jav.sim.var  <- MIextract(jav.imp.fit, fun = function(x) diag(vcov(x)));  jav.sim.var
+    jav.sim.est  <- MIcombine(jav.sim.coef, jav.sim.var); jav.sim.est
+    
+    # Add the results to the estimates data set
+    estimates1 <- data.frame(Rep = i, 
+                             Cmb = jav.sim.est[["coefficients"]][["cmb"]],
+                             Stage = jav.sim.est[["coefficients"]][["stage.var"]],
+                             Int = jav.sim.est[["coefficients"]][["IntStageCmb"]],
+                             CmbSE = jav.sim.est[["variance"]][6,6],
+                             StageSE = jav.sim.est[["variance"]][7,7],
+                             IntSE = jav.sim.est[["variance"]][8,8],
+                             DGM = 6,
+                             Method = 'JAV'
+    )
+    estimates <- rbind(estimates, estimates1)
+    
+    # State the completion of the simulation
+    print(paste0('JAV imputation: ', 'simulation ', i, ' done'))
+    
+    
+  ########################
+  # Stratify-impute-append
+  ########################
+    
+    
+    # Obtain the data
+    data2 <- data
+    
+    # Redefine the variables as factors
+    data2$stage.var  <- as.factor(data2[[paste0("stage.omar.20.", i)]])      # Stage variable
+    
+    # Specify the variables to be used in the imputation
+    data2 <- data2[,c('death','treat','agediag','sex','dep','cmb','stage.var')]
+    
+    # Stratify the data by levels of comorbidity
+    # For those without comorbidity
+    data2.cmb0 <- data2[data2$cmb == 0,]
+    data2.cmb0 <- subset(data2.cmb0, select = -(cmb))
+    # For those with comorbidity
+    data2.cmb1 <- data2[data2$cmb == 1,]
+    data2.cmb1 <- subset(data2.cmb1, select = -(cmb))  
+    
+    # Separately for each strata of comorbidity, impute the partially observed variables  
+    # For those without comorbidity
+    # Impute
+    sia.imp.cmb0 <- mice(data2.cmb0, meth = c('','','','','','logreg'), 
+                         m=m, maxit = maxit, seed = i)  # Perform passive imputation    
+    # State the completion of the imputation for cmb0
+    print(paste0("Imputation for Cmb0 done"))
+    
+    # For those with comorbidity
+    #Impute
+    sia.imp.cmb1 <- mice(data2.cmb1, meth = c('','','','','','logreg'), 
+                         m=m, maxit = maxit, seed = i)  # Perform passive imputation    
+    # State the completion of the imputation for cmb1
+    print(paste0("Imputation for Cmb1 done"))
+    
+    # For each imputed data set, create the interaction variable based on stage*comorbidity
+    sia.imp.cmb0.data <- list()
+    sia.imp.cmb1.data <- list()
+    for (j in 1:m) {
+      # For those without comorbidity
+      sia.imp.cmb0.data[[j]] <- complete(sia.imp.cmb0, j)
       
-      # Average of the coefficients across the simulations
-      {
-      smcfcs.mean.coef[[y]] <-  data.frame(matrix(nrow=1,ncol=8))
-      smcfcs.mean.coef[[y]][1] <- mean(smcfcs.all.coef[[y]]$X1)
-      smcfcs.mean.coef[[y]][2] <- mean(smcfcs.all.coef[[y]]$X2)
-      smcfcs.mean.coef[[y]][3] <- mean(smcfcs.all.coef[[y]]$X3)
-      smcfcs.mean.coef[[y]][4] <- mean(smcfcs.all.coef[[y]]$X4)
-      smcfcs.mean.coef[[y]][5] <- mean(smcfcs.all.coef[[y]]$X5)
-      smcfcs.mean.coef[[y]][6] <- mean(smcfcs.all.coef[[y]]$X6)
-      smcfcs.mean.coef[[y]][7] <- mean(smcfcs.all.coef[[y]]$X7)
-      smcfcs.mean.coef[[y]][8] <- mean(smcfcs.all.coef[[y]]$X8)
-      colnames(smcfcs.mean.coef[[y]]) <- c('Intercept','Treat','Agediag','Sex','Dep','Cmb','Stage','Int')
-      #exp(smcfcs.mean.coef[[y]])
-      }
+      sia.imp.cmb0.data[[j]]$cmb <- 0
       
-      # Summary of the results so far
-      #exp(model1$coefficients); exp(model2$coefficients); exp(pass.mean.coef); exp(jav.mean.coef); exp(sia.mean.coef); exp(smcfcs.mean.coef)
+      sia.imp.cmb0.data[[j]]$stage.var <- as.numeric(sia.imp.cmb0.data[[j]]$stage.var)
+      
+      sia.imp.cmb0.data[[j]]$stage.var <- sia.imp.cmb0.data[[j]]$stage.var - 1
+      
+      sia.imp.cmb0.data[[j]]$IntStageCmb <- sia.imp.cmb0.data[[j]]$cmb * sia.imp.cmb0.data[[j]]$stage.var
+      
+      # For those with comorbidity
+      sia.imp.cmb1.data[[j]] <- complete(sia.imp.cmb1, j)
+      
+      sia.imp.cmb1.data[[j]]$cmb <- 1
+      
+      sia.imp.cmb1.data[[j]]$stage.var <- as.numeric(sia.imp.cmb1.data[[j]]$stage.var)
+      
+      sia.imp.cmb1.data[[j]]$stage.var <- sia.imp.cmb1.data[[j]]$stage.var - 1
+      
+      sia.imp.cmb1.data[[j]]$IntStageCmb <- sia.imp.cmb1.data[[j]]$cmb * sia.imp.cmb1.data[[j]]$stage.var
+    }
+    
+    # Append the imputed data sets for the two strata (giving K imputed data sets)
+    sia.sim.cmb.data.merge <- list()
+    for (j in 1:m) {
+      sia.sim.cmb.data.merge[[j]] <- rbind(sia.imp.cmb0.data[[j]], sia.imp.cmb1.data[[j]])
+    }
+    
+    # Obtain coefficients for each of the data sets
+    sia.imp.fit <- list()
+    for (j in 1:m) {  
+      invisible(capture.output(sia.imp.fit.j <- glm(death ~ treat + agediag + sex + dep + cmb + stage.var + IntStageCmb,
+                                                    data = sia.sim.cmb.data.merge[[j]], family = "binomial") #; summary(sia.imp.fit.i)
+      ))
+      sia.imp.fit[[j]] <- sia.imp.fit.j
+      print(paste0("Model ", j, " done"))
+    }    
+    
+    # Within each simulation, combine the estimates
+    print(paste0("Combining estimates"))
+    sia.sim.coef <- MIextract(sia.imp.fit, fun = coef);  sia.sim.coef
+    sia.sim.var  <- MIextract(sia.imp.fit, fun = function(x) diag(vcov(x)));  sia.sim.var
+    sia.sim.est  <- MIcombine(sia.sim.coef, sia.sim.var); sia.sim.est
+    
+    # Add the results to the estimates data set
+    estimates1 <- data.frame(Rep = i, 
+                             Cmb = sia.sim.est[["coefficients"]][["cmb"]],
+                             Stage = sia.sim.est[["coefficients"]][["stage.var"]],
+                             Int = sia.sim.est[["coefficients"]][["IntStageCmb"]],
+                             CmbSE = sia.sim.est[["variance"]][6,6],
+                             StageSE = sia.sim.est[["variance"]][7,7],
+                             IntSE = sia.sim.est[["variance"]][8,8],
+                             DGM = 6,
+                             Method = 'SIA'
+    )
+    estimates <- rbind(estimates, estimates1)
+    
+    # State the completion of this simulation
+    print(paste0('SIA imputation: ', 'simulation ', i, ' done'))
+    
+    
+  ####################################
+  # SMC-FCS
+  ####################################
+    
+    # Obtain the data
+    data2 <- data
+    
+    # Redefine the variables as factors
+    data2$stage.var  <- as.factor(data2[[paste0("stage.omar.20.", i)]])      # Stage variable
+    
+    # Specify the variables to be used in the imputation
+    data.subset <- data2[,c('death','treat','agediag','sex','dep','cmb','stage.var')]
+    
+    # Perform imputation on the variables ("SMC-FCS")
+    smcfcs.imp <- smcfcs(data.subset, smtype = 'logistic', 
+                         smformula = 'death ~ treat + agediag + sex + dep + cmb + stage.var + cmb*stage.var',
+                         method = c('','','','','','','logreg'), m=m, numit=numit) 
+    
+    # Fit substantive model
+    smcfcslist <- imputationList(smcfcs.imp$impDatasets)
+    smcfcs.models <- with(smcfcslist, glm(death ~ treat + agediag + sex + dep + 
+                                            cmb + stage.var + cmb*stage.var, family = 'binomial'))  
+    smcfcs.sim.est <- MIcombine(smcfcs.models); smcfcs.sim.est
+    
+    # Add the results to the estimates data set
+    estimates1 <- data.frame(Rep = i, 
+                             Cmb = smcfcs.sim.est[["coefficients"]][["cmb"]],
+                             Stage = smcfcs.sim.est[["coefficients"]][["stage.var1"]],
+                             Int = smcfcs.sim.est[["coefficients"]][["cmb:stage.var1"]],
+                             CmbSE = smcfcs.sim.est[["variance"]][6,6],
+                             StageSE = smcfcs.sim.est[["variance"]][7,7],
+                             IntSE = smcfcs.sim.est[["variance"]][8,8],
+                             DGM = 6,
+                             Method = 'SMCFCS'
+    )
+    estimates <- rbind(estimates, estimates1)
+    
+    # State the completion of this simulation
+    print(paste0('SMCFCS imputation: ', 'simulation ', i, ' done'))
+    
+  }
+
 }
-
-
-    
+  
+  
+  
+##################
+# Save the results
+##################
+  
+  saveRDS(estimates, file='estimates 1-100.Rdata')
+  
